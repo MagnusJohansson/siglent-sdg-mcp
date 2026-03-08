@@ -1,0 +1,49 @@
+{
+  "name": "siglent-sdg-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for Siglent SDG waveform generator control via SCPI over TCP sockets",
+  "type": "module",
+  "main": "build/index.js",
+  "bin": {
+    "siglent-sdg-mcp": "./build/index.js"
+  },
+  "files": [
+    "build/**/*.js",
+    "build/**/*.d.ts"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "start": "node build/index.js",
+    "dev": "tsc && node build/index.js",
+    "inspector": "npx @modelcontextprotocol/inspector node build/index.js",
+    "prepublishOnly": "npm run build",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "siglent",
+    "waveform-generator",
+    "scpi"
+  ],
+  "author": "Magnus Johansson",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/magnusjohansson/siglent-sdg-mcp.git"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
