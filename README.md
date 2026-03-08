@@ -6,6 +6,8 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that l
 
 This MCP server communicates with Siglent SDG waveform generators via SCPI commands over TCP sockets (port 5025). No VISA drivers or NI-MAX installation required — just a network connection to your generator.
 
+![Oscilloscope screenshot captured via MCP](docs/Siglent-SDG-1032X.jpeg)
+
 **Key features:**
 
 - 21 tools covering output control, waveform generation, modulation, sweep, burst, arbitrary waveforms, and more
