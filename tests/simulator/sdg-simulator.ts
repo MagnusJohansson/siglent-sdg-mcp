@@ -34,14 +34,10 @@ export class SdgSimulator {
     C1: defaultChannel(),
     C2: defaultChannel(),
   };
-  /** When set, replies to BSWV? with this text instead (to test unparseable replies). */
-  bswvReplyOverride: string | undefined;
-
   /** Reset both channels to the default setup (test isolation). */
   resetState(): void {
     this.channels.C1 = defaultChannel();
     this.channels.C2 = defaultChannel();
-    this.bswvReplyOverride = undefined;
   }
 
   constructor() {
@@ -125,7 +121,6 @@ export class SdgSimulator {
 
     const bswvQuery = /^(C[12]):BSWV\?$/.exec(upper);
     if (bswvQuery) {
-      if (this.bswvReplyOverride !== undefined) return this.bswvReplyOverride;
       const ch = this.channels[bswvQuery[1] as "C1" | "C2"];
       const h = ch.offset + ch.amp / 2;
       const l = ch.offset - ch.amp / 2;

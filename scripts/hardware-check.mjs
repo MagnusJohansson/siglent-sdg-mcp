@@ -12,11 +12,9 @@
  *   changed frequency, not an energized output.
  * - Safety net: the output state is read after every probe. If it is ever ON,
  *   the script switches it OFF immediately and aborts.
- * - Aborts if C1 output is already ON. Works on C1 only, amplitudes <= 2 Vpp.
+ * - Aborts if C1 output is already ON. Works on C1 only, amplitude 1 Vpp.
  * - Changes C1 waveform, load and burst settings. Restore them from the
  *   front panel afterwards if needed.
- * - The read-back check before switching an output on is NOT exercised here,
- *   because testing it means asking for output ON. The simulator tests cover it.
  *
  * Security checks verify the instrument state by reading it back, not just
  * by looking at the error the server returned.
@@ -90,7 +88,7 @@ async function main() {
   console.log(`Hardware check: ${ip}\n`);
 
   // ---------------------------------------------------------------- default
-  console.log("1. Default configuration (no limits, raw SCPI off)");
+  console.log("1. Default configuration (raw SCPI off)");
   let s = await startServer();
   check("connect + identify", s.conn.ok && /SDG/i.test(s.conn.text), s.conn.text.split("\n").pop());
   if (!s.conn.ok) throw new Error("Cannot connect; aborting.");
@@ -137,6 +135,7 @@ async function main() {
   const attacks = [
     ["F1 setter via scpi_query", "scpi_query", { command: payload }],
     ["F1 compound query hides setter", "scpi_query", { command: `C1:BSWV?;${payload}` }],
+    ["F1 setter parameters after query header", "scpi_query", { command: "C1:BSWV? FRQ,1234" }],
     ["F2 newline injection in load", "configure_output", { channel: "C1", load: `50\n${payload}` }],
     ["F2 compound injection in load", "configure_output", { channel: "C1", load: `50;${payload}` }],
     ["F2 newline injection in cycles", "configure_burst", { channel: "C1", cycles: `1\n${payload}` }],
@@ -155,32 +154,6 @@ async function main() {
   const still = await s.call("identify");
   check("F3 connect to another LAN host rejected, session intact", !r.ok && still.ok, r.text.slice(0, 70));
 
-  await s.client.close();
-
-  // ----------------------------------------------------------------- limits
-  console.log("\n2. Output limits (max 2 Vpp, max ±1.5 V)");
-  s = await startServer({ SIGLENT_MAX_AMPLITUDE_VPP: "2", SIGLENT_MAX_VOLTAGE: "1.5" });
-  check("connect", s.conn.ok);
-
-  r = await s.call("configure_basic_wave", { channel: "C1", amplitude: 1.5, offset: 0 });
-  rb = (await s.call("get_basic_wave", { channel: "C1" })).text;
-  check("1.5 Vpp within limit accepted", r.ok && /AMP,1\.5V/i.test(rb), rb);
-
-  for (const [label, tool, args] of [
-    ["3 Vpp rejected", "configure_basic_wave", { channel: "C1", amplitude: 3 }],
-    ["offset 2 V rejected", "configure_basic_wave", { channel: "C1", offset: 2 }],
-    ["Vrms amplitude rejected", "configure_basic_wave", { channel: "C1", amplitude_vrms: 0.5 }],
-    ["high/low ±1.5 V (3 Vpp span) rejected", "configure_basic_wave", { channel: "C1", high_level: 1.5, low_level: -1.5 }],
-    ["single high level rejected", "configure_basic_wave", { channel: "C1", high_level: 0.5 }],
-    ["reset (4 Vpp default) rejected", "reset", {}],
-    ["copy C2 -> C1 rejected", "copy_channel", { source: "C2", destination: "C1" }],
-  ]) {
-    r = await s.call(tool, args);
-    await assertOffOrAbort(s, label);
-    rb = (await s.call("get_basic_wave", { channel: "C1" })).text;
-    check(label + ", instrument unchanged", !r.ok && /AMP,1\.5V/i.test(rb) && /OFST,0V/i.test(rb), r.text.slice(0, 70));
-  }
-  check("output still OFF", (await outputState(s.call)) === "OFF");
   await s.client.close();
 
   console.log(`\n${passed} passed, ${failed} failed`);

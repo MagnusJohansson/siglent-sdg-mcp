@@ -17,7 +17,7 @@ This MCP server communicates with Siglent SDG waveform generators via SCPI comma
 - Auto-connect on startup via environment variable
 - Query queue serializes commands automatically — tools can safely run in parallel
 - Read-only SCPI query escape hatch; raw SCPI commands are opt-in
-- Security guardrails: command-injection protection, connect-target allowlist, optional output voltage limits (see [Security](#security))
+- Security guardrails: command-injection protection, query-only `scpi_query`, connect-target allowlist (see [Security](#security))
 
 ## Compatibility
 
@@ -109,9 +109,7 @@ Replace `/path/to/siglent-sdg-mcp` with the actual path to your clone.
 | `SIGLENT_SDG_PORT` | No | `5025` | TCP port (only change if your setup differs) |
 | `SIGLENT_PORT` | No | `5025` | Fallback if `SIGLENT_SDG_PORT` is not set |
 | `SIGLENT_ALLOWED_HOSTS` | No | — | Comma-separated hosts the `connect` tool may use, in addition to `SIGLENT_SDG_IP`. `*` allows any host (not recommended). See [Security](#security) |
-| `SIGLENT_MAX_AMPLITUDE_VPP` | No | — | Reject any amplitude above this value (Vpp) |
-| `SIGLENT_MAX_VOLTAGE` | No | — | Reject any offset, high/low level or noise mean beyond ±this value (V) |
-| `SIGLENT_ALLOW_RAW_SCPI` | No | `false` | Register the raw `scpi_command` tool. Ignored when output limits are set |
+| `SIGLENT_ALLOW_RAW_SCPI` | No | `false` | Register the raw `scpi_command` tool. Requires `SIGLENT_SDG_IP` or `SIGLENT_ALLOWED_HOSTS` |
 
 ### Auto-Connect Behavior
 
@@ -375,16 +373,13 @@ What the server enforces, regardless of what the model was told:
 |-----------|------------------|
 | **Command-boundary check** on every string written to the socket: no control characters (incl. newlines), no `;`, ASCII only, max 512 chars | Smuggling extra SCPI commands through any parameter (`load: "50\nC1:OUTP ON"`) |
 | **Strict parameter formats** for the free-text parameters (`load`, `cycles`, arbitrary waveform `name`) | Breaking out of a parameter or a quoted string |
-| **`scpi_query` is query-only**: the command must be a single header ending in `?` | Using the "read-only" tool to change state (`scpi_query("C1:OUTP ON")`) |
-| **Raw `scpi_command` is off by default** | An unrestricted command channel to the instrument |
+| **`scpi_query` is query-only**: a single header ending in `?`; parameters after `?` only for queries that take them (`WVDT?`, `STL?`); common commands only as pure queries (`*IDN?`, `*OPC?`, ...) | Using the "read-only" tool to change state (`scpi_query("C1:OUTP ON")`, `"C1:BSWV? AMP,10"`, `"*RST?"`) |
+| **Raw `scpi_command` is off by default**, and can only be enabled together with a named instrument host | An unrestricted command channel to the instrument, or to other SCPI devices on the LAN (power supplies often use port 5025 too) |
 | **Connect allowlist**: `connect` only reaches `SIGLENT_SDG_IP`, `SIGLENT_ALLOWED_HOSTS`, or (if neither is set) private-LAN IP addresses, and only the instrument port | Using the server as a TCP client to reach other services, e.g. `169.254.169.254` |
-| **Optional output limits** (`SIGLENT_MAX_AMPLITUDE_VPP`, `SIGLENT_MAX_VOLTAGE`) checked on every waveform command, from any tool, including the span between high and low level | Exceeding what your circuit can take |
-| With limits set: **`reset` and `copy_channel` are blocked** | Loading unchecked settings (the 4 Vpp default, or the other channel's settings) |
-| With limits set: **read-back before switching an output on** (`Cn:BSWV?`); refuses if anything is over the limit or the reply can't be parsed | Energizing settings made on the front panel, before the server started, or through a combination of individually valid changes |
+**What it does not protect against:**
 
-Output limits and raw SCPI are mutually exclusive: a raw command channel can't be held to a limit (SCPI has long-form headers and model-specific commands), so `SIGLENT_ALLOW_RAW_SCPI` is ignored when limits are set.
-
-**What it does not protect against:** anyone with network access to port 5025 can control the instrument directly, without going through this server. The instrument has no authentication. Network segmentation is the control for that. For a hardware backstop, also set the generator's own limit (`C1:BSWV MAX_OUTPUT_AMP,<Vpp>` on models that support it).
+- **Output voltage.** This server does **not** limit amplitude or offset. The model can set anything the generator allows, up to 20 Vpp. To protect a circuit, set the generator's own limit on the front panel or with `C1:BSWV MAX_OUTPUT_AMP,<Vpp>` (on models that support it). Server-side limits are being designed separately: a first version was reviewed and found to be bypassable, so it isn't shipped (see the threat model).
+- **Other clients on port 5025.** Anyone with network access to the instrument can control it directly, without going through this server. The instrument has no authentication. Network segmentation is the control for that.
 
 The full threat model, including residual risks, is in [docs/threat-model.md](docs/threat-model.md).
 
@@ -453,7 +448,7 @@ src/
   config.ts             # Environment parsing, effective security settings
   connection.ts         # TCP socket manager with query queue (security choke point)
   security/
-    scpi-guard.ts       # Command-boundary, query-only and output-limit checks
+    scpi-guard.ts       # Command-boundary and query-only checks
     host-policy.ts      # Connect-target allowlist
   tools/
     connection.ts       # connect, disconnect, identify

@@ -1,4 +1,3 @@
-import type { OutputLimits } from "./security/scpi-guard.js";
 import type { HostPolicy } from "./security/host-policy.js";
 
 export interface ServerConfig {
@@ -6,7 +5,6 @@ export interface ServerConfig {
   defaultHost?: string;
   defaultPort: number;
   hostPolicy: HostPolicy;
-  outputLimits: OutputLimits;
   /** Whether the raw `scpi_command` tool is registered. */
   rawScpiEnabled: boolean;
   /** Human-readable notes about the effective configuration, logged at startup. */
@@ -14,15 +12,6 @@ export interface ServerConfig {
 }
 
 const DEFAULT_PORT = 5025;
-
-function parsePositiveNumber(name: string, value: string | undefined): number | undefined {
-  if (value === undefined || value.trim() === "") return undefined;
-  const n = Number(value);
-  if (!Number.isFinite(n) || n <= 0) {
-    throw new Error(`${name} must be a positive number, got "${value}".`);
-  }
-  return n;
-}
 
 function parsePort(name: string, value: string | undefined): number | undefined {
   if (value === undefined || value.trim() === "") return undefined;
@@ -59,24 +48,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     notes.push("WARNING: SIGLENT_ALLOWED_HOSTS=* allows connecting to any host.");
   }
 
-  const outputLimits: OutputLimits = {
-    maxAmplitudeVpp: parsePositiveNumber("SIGLENT_MAX_AMPLITUDE_VPP", env.SIGLENT_MAX_AMPLITUDE_VPP),
-    maxVoltage: parsePositiveNumber("SIGLENT_MAX_VOLTAGE", env.SIGLENT_MAX_VOLTAGE),
-  };
-  const limitsActive =
-    outputLimits.maxAmplitudeVpp !== undefined || outputLimits.maxVoltage !== undefined;
-
-  // A raw command channel cannot be held to output limits: SCPI has long-form
-  // headers and model-specific commands, so any denylist parser is bypassable.
-  // Limits and raw SCPI are therefore mutually exclusive.
-  let rawScpiEnabled = isTrue(env.SIGLENT_ALLOW_RAW_SCPI);
-  if (rawScpiEnabled && limitsActive) {
-    rawScpiEnabled = false;
-    notes.push(
-      "WARNING: SIGLENT_ALLOW_RAW_SCPI ignored because output limits are configured; " +
-        "raw commands could bypass them."
+  // Raw SCPI turns `connect` into a general command channel. Without an
+  // explicit host list, `connect` falls back to "any private-LAN IP on the
+  // instrument port", which also matches bench power supplies and electronic
+  // loads (they commonly use 5025 too). So raw SCPI requires explicit hosts.
+  const rawScpiEnabled = isTrue(env.SIGLENT_ALLOW_RAW_SCPI);
+  if (rawScpiEnabled && allowedHosts.length === 0) {
+    throw new Error(
+      "SIGLENT_ALLOW_RAW_SCPI requires SIGLENT_SDG_IP or SIGLENT_ALLOWED_HOSTS, so raw " +
+        "commands can only reach instruments you have named."
     );
-  } else if (rawScpiEnabled) {
+  }
+  if (rawScpiEnabled) {
     notes.push("WARNING: raw scpi_command tool enabled; the model can send any SCPI command.");
   }
 
@@ -87,7 +70,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       allowedHosts,
       allowedPorts: [...new Set([DEFAULT_PORT, defaultPort])],
     },
-    outputLimits,
     rawScpiEnabled,
     notes,
   };

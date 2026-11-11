@@ -1,13 +1,5 @@
 import * as net from "node:net";
-import {
-  assertIsQuery,
-  assertReadbackWithinLimits,
-  assertWireSafe,
-  assertWithinLimits,
-  hasLimits,
-  outputOnChannel,
-  type OutputLimits,
-} from "./security/scpi-guard.js";
+import { assertIsQuery, assertWireSafe } from "./security/scpi-guard.js";
 
 const DEFAULT_PORT = 5025;
 const DEFAULT_TIMEOUT = 5000;
@@ -34,16 +26,6 @@ export class SiglentConnection {
   private headerParsed = false;
   private queryQueue: QueuedQuery[] = [];
   private queryRunning = false;
-  private outputLimits: OutputLimits = {};
-
-  /**
-   * Set output limits enforced on every command sent through this connection.
-   * The connection is the single choke point to the instrument, so checks here
-   * apply regardless of which tool built the command.
-   */
-  setOutputLimits(limits: OutputLimits): void {
-    this.outputLimits = { ...limits };
-  }
 
   async connect(host: string, port: number = DEFAULT_PORT): Promise<string> {
     if (this.socket) {
@@ -130,18 +112,10 @@ export class SiglentConnection {
   }
 
   async sendCommand(cmd: string): Promise<void> {
+    // The connection is the single choke point to the instrument, so this
+    // check applies regardless of which tool built the command.
     assertWireSafe(cmd);
-    assertWithinLimits(cmd, this.outputLimits);
     this.ensureConnected();
-
-    // Before energizing an output, verify what the instrument will actually
-    // output. Limits on individual commands can't see front-panel changes,
-    // settings made before the server started, or combined effects.
-    const channel = hasLimits(this.outputLimits) ? outputOnChannel(cmd) : undefined;
-    if (channel) {
-      const reply = await this.query(`${channel}:BSWV?`);
-      assertReadbackWithinLimits(reply, this.outputLimits);
-    }
 
     return new Promise((resolve, reject) => {
       this.socket!.write(cmd + "\n", (err) => {

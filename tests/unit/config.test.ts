@@ -8,7 +8,6 @@ describe("loadConfig", () => {
     expect(c.defaultHost).toBeUndefined();
     expect(c.defaultPort).toBe(5025);
     expect(c.hostPolicy).toEqual({ allowedHosts: [], allowedPorts: [5025] });
-    expect(c.outputLimits).toEqual({ maxAmplitudeVpp: undefined, maxVoltage: undefined });
   });
 
   it("allows the configured instrument host and port", () => {
@@ -23,22 +22,21 @@ describe("loadConfig", () => {
   });
 
   it("enables raw SCPI only when explicitly asked", () => {
-    expect(loadConfig({ SIGLENT_ALLOW_RAW_SCPI: "true" }).rawScpiEnabled).toBe(true);
-    expect(loadConfig({ SIGLENT_ALLOW_RAW_SCPI: "no" }).rawScpiEnabled).toBe(false);
+    expect(loadConfig({ SIGLENT_SDG_IP: "192.168.1.126", SIGLENT_ALLOW_RAW_SCPI: "true" }).rawScpiEnabled).toBe(true);
+    expect(loadConfig({ SIGLENT_SDG_IP: "192.168.1.126", SIGLENT_ALLOW_RAW_SCPI: "no" }).rawScpiEnabled).toBe(false);
   });
 
-  it("refuses raw SCPI when output limits are configured", () => {
-    const c = loadConfig({ SIGLENT_ALLOW_RAW_SCPI: "true", SIGLENT_MAX_AMPLITUDE_VPP: "5" });
-    expect(c.rawScpiEnabled).toBe(false);
-    expect(c.notes.join(" ")).toMatch(/ignored because output limits/);
+  it("refuses raw SCPI unless the reachable hosts are named", () => {
+    // Without named hosts, connect accepts any private-LAN IP on 5025, which
+    // includes other SCPI instruments such as bench power supplies.
+    expect(() => loadConfig({ SIGLENT_ALLOW_RAW_SCPI: "true" })).toThrow(/requires SIGLENT_SDG_IP/);
+    expect(loadConfig({ SIGLENT_ALLOWED_HOSTS: "10.0.0.6", SIGLENT_ALLOW_RAW_SCPI: "true" }).rawScpiEnabled).toBe(true);
   });
 
   it.each([
-    ["SIGLENT_MAX_AMPLITUDE_VPP", "-1"],
-    ["SIGLENT_MAX_AMPLITUDE_VPP", "five"],
-    ["SIGLENT_MAX_VOLTAGE", "0"],
     ["SIGLENT_SDG_PORT", "70000"],
     ["SIGLENT_SDG_PORT", "50.5"],
+    ["SIGLENT_PORT", "abc"],
   ])("fails closed on invalid %s=%s", (name, value) => {
     expect(() => loadConfig({ [name]: value })).toThrow();
   });
