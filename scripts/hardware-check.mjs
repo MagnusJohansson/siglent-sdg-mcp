@@ -6,10 +6,17 @@
  * Usage:  npm run build && node scripts/hardware-check.mjs <instrument-ip>
  *
  * SAFETY
- * - Never turns an output ON. Aborts if C1 output is already ON.
- * - Works on C1 only, amplitudes <= 2 Vpp.
+ * - Never asks for an output to be turned ON, not even as an attack payload:
+ *   injection probes try to change the frequency to 1234 Hz instead, which is
+ *   harmless and easy to read back. If a guard regresses, the worst case is a
+ *   changed frequency, not an energized output.
+ * - Safety net: the output state is read after every probe. If it is ever ON,
+ *   the script switches it OFF immediately and aborts.
+ * - Aborts if C1 output is already ON. Works on C1 only, amplitudes <= 2 Vpp.
  * - Changes C1 waveform, load and burst settings. Restore them from the
  *   front panel afterwards if needed.
+ * - The read-back check before switching an output on is NOT exercised here,
+ *   because testing it means asking for output ON. The simulator tests cover it.
  *
  * Security checks verify the instrument state by reading it back, not just
  * by looking at the error the server returned.
@@ -63,6 +70,22 @@ async function outputState(call) {
   return m ? m[1] ?? m[2] : r.text;
 }
 
+/** Safety net: if C1 output is anything but OFF, switch it off and abort. */
+async function assertOffOrAbort(s, context) {
+  const state = await outputState(s.call);
+  if (state === "OFF") return;
+  await s.call("configure_output", { channel: "C1", state: "OFF" });
+  console.log(`\n  ABORT: C1 output read "${state}" after ${context}. Switched it OFF. A guard has regressed.`);
+  await s.client.close();
+  process.exit(1);
+}
+
+/** Read C1 frequency from the basic-wave settings. */
+async function frequency(call) {
+  const r = await call("get_basic_wave", { channel: "C1" });
+  return /FRQ,([0-9.eE+-]+)HZ/i.exec(r.text)?.[1];
+}
+
 async function main() {
   console.log(`Hardware check: ${ip}\n`);
 
@@ -107,19 +130,22 @@ async function main() {
   r = await s.call("scpi_query", { command: "C1:BSWV?" });
   check("scpi_query C1:BSWV?", r.ok && /WVTP/.test(r.text), r.text.slice(0, 60));
 
-  // Security: rejected AND the instrument state is unchanged.
-  console.log("\n  Security (output must stay OFF)");
+  // Security: rejected AND the instrument state is unchanged. The payload is a
+  // harmless frequency change (1000 Hz -> 1234 Hz), never "output ON".
+  console.log("\n  Security (payload: change frequency to 1234 Hz; must stay 1000 Hz)");
+  const payload = "C1:BSWV FRQ,1234";
   const attacks = [
-    ["F1 scpi_query sets output ON", "scpi_query", { command: "C1:OUTP ON" }],
-    ["F1 compound query hides setter", "scpi_query", { command: "C1:OUTP?;C1:OUTP ON" }],
-    ["F2 newline injection in load", "configure_output", { channel: "C1", load: "50\nC1:OUTP ON" }],
-    ["F2 compound injection in load", "configure_output", { channel: "C1", load: "50;C1:OUTP ON" }],
-    ["F2 newline injection in cycles", "configure_burst", { channel: "C1", cycles: "1\nC1:OUTP ON" }],
+    ["F1 setter via scpi_query", "scpi_query", { command: payload }],
+    ["F1 compound query hides setter", "scpi_query", { command: `C1:BSWV?;${payload}` }],
+    ["F2 newline injection in load", "configure_output", { channel: "C1", load: `50\n${payload}` }],
+    ["F2 compound injection in load", "configure_output", { channel: "C1", load: `50;${payload}` }],
+    ["F2 newline injection in cycles", "configure_burst", { channel: "C1", cycles: `1\n${payload}` }],
   ];
   for (const [label, tool, args] of attacks) {
     r = await s.call(tool, args);
-    const state = await outputState(s.call);
-    check(label, !r.ok && state === "OFF", `rejected=${!r.ok}, output=${state}`);
+    await assertOffOrAbort(s, label);
+    const frq = await frequency(s.call);
+    check(label, !r.ok && frq === "1000", `rejected=${!r.ok}, FRQ=${frq}Hz`);
   }
 
   const tools = (await s.client.listTools()).tools.map((t) => t.name);
@@ -132,20 +158,25 @@ async function main() {
   await s.client.close();
 
   // ----------------------------------------------------------------- limits
-  console.log("\n2. Output limits (max 2 Vpp, max ±1 V)");
-  s = await startServer({ SIGLENT_MAX_AMPLITUDE_VPP: "2", SIGLENT_MAX_VOLTAGE: "1" });
+  console.log("\n2. Output limits (max 2 Vpp, max ±1.5 V)");
+  s = await startServer({ SIGLENT_MAX_AMPLITUDE_VPP: "2", SIGLENT_MAX_VOLTAGE: "1.5" });
   check("connect", s.conn.ok);
 
   r = await s.call("configure_basic_wave", { channel: "C1", amplitude: 1.5, offset: 0 });
   rb = (await s.call("get_basic_wave", { channel: "C1" })).text;
   check("1.5 Vpp within limit accepted", r.ok && /AMP,1\.5V/i.test(rb), rb);
 
-  for (const [label, args] of [
-    ["3 Vpp rejected", { channel: "C1", amplitude: 3 }],
-    ["offset 2 V rejected", { channel: "C1", offset: 2 }],
-    ["Vrms amplitude rejected", { channel: "C1", amplitude_vrms: 0.5 }],
+  for (const [label, tool, args] of [
+    ["3 Vpp rejected", "configure_basic_wave", { channel: "C1", amplitude: 3 }],
+    ["offset 2 V rejected", "configure_basic_wave", { channel: "C1", offset: 2 }],
+    ["Vrms amplitude rejected", "configure_basic_wave", { channel: "C1", amplitude_vrms: 0.5 }],
+    ["high/low ±1.5 V (3 Vpp span) rejected", "configure_basic_wave", { channel: "C1", high_level: 1.5, low_level: -1.5 }],
+    ["single high level rejected", "configure_basic_wave", { channel: "C1", high_level: 0.5 }],
+    ["reset (4 Vpp default) rejected", "reset", {}],
+    ["copy C2 -> C1 rejected", "copy_channel", { source: "C2", destination: "C1" }],
   ]) {
-    r = await s.call("configure_basic_wave", args);
+    r = await s.call(tool, args);
+    await assertOffOrAbort(s, label);
     rb = (await s.call("get_basic_wave", { channel: "C1" })).text;
     check(label + ", instrument unchanged", !r.ok && /AMP,1\.5V/i.test(rb) && /OFST,0V/i.test(rb), r.text.slice(0, 70));
   }

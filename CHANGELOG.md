@@ -20,7 +20,11 @@ Security release. Tool arguments come from a language model and are now treated 
 
 ### Added
 
-- Optional output limits: `SIGLENT_MAX_AMPLITUDE_VPP` and `SIGLENT_MAX_VOLTAGE`, enforced on every waveform command from any tool.
+- Optional output limits: `SIGLENT_MAX_AMPLITUDE_VPP` and `SIGLENT_MAX_VOLTAGE`, enforced on every waveform command from any tool. With limits set:
+  - the span between high and low level is checked, and a single level can't be set while an amplitude cap is active;
+  - `reset` and `copy_channel` are rejected, because they load unchecked settings;
+  - before an output is switched on, the instrument's settings are read back and checked, and the output is refused if they can't be verified.
+- `scpi_query` accepts absolute queries with a leading root colon (e.g. `:SENSe:COUNTer:FREQuency?`).
 - `destructiveHint` on `reset` and `scpi_command`.
 - SCPI simulator and end-to-end security tests (`npm test`), plus a CI workflow. Tests also run before npm publish.
 - Threat model: `docs/threat-model.md`.

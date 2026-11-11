@@ -15,6 +15,14 @@ interface ChannelState {
   output: "ON" | "OFF";
   load: string;
   polarity: string;
+  /** Basic wave amplitude (Vpp) and offset (V). HLEV/LLEV are derived. */
+  amp: number;
+  offset: number;
+}
+
+/** SDG1032X default setup, as recalled by *RST (observed on hardware: 4 Vpp, 0 V). */
+function defaultChannel(): ChannelState {
+  return { output: "OFF", load: "HZ", polarity: "NOR", amp: 4, offset: 0 };
 }
 
 export class SdgSimulator {
@@ -23,9 +31,18 @@ export class SdgSimulator {
   /** Every line received, in order (without the terminating newline). */
   readonly received: string[] = [];
   readonly channels: Record<"C1" | "C2", ChannelState> = {
-    C1: { output: "OFF", load: "HZ", polarity: "NOR" },
-    C2: { output: "OFF", load: "HZ", polarity: "NOR" },
+    C1: defaultChannel(),
+    C2: defaultChannel(),
   };
+  /** When set, replies to BSWV? with this text instead (to test unparseable replies). */
+  bswvReplyOverride: string | undefined;
+
+  /** Reset both channels to the default setup (test isolation). */
+  resetState(): void {
+    this.channels.C1 = defaultChannel();
+    this.channels.C2 = defaultChannel();
+    this.bswvReplyOverride = undefined;
+  }
 
   constructor() {
     this.server = net.createServer((socket) => this.handle(socket));
@@ -94,10 +111,45 @@ export class SdgSimulator {
     }
 
     if (upper === "*RST") {
-      for (const ch of Object.values(this.channels)) {
-        ch.output = "OFF";
-        ch.load = "HZ";
-        ch.polarity = "NOR";
+      this.channels.C1 = defaultChannel();
+      this.channels.C2 = defaultChannel();
+      return undefined;
+    }
+
+    const copy = /^PACP (C[12]),(C[12])$/.exec(upper);
+    if (copy) {
+      const [dest, src] = [copy[1] as "C1" | "C2", copy[2] as "C1" | "C2"];
+      this.channels[dest] = { ...this.channels[src], output: this.channels[dest].output };
+      return undefined;
+    }
+
+    const bswvQuery = /^(C[12]):BSWV\?$/.exec(upper);
+    if (bswvQuery) {
+      if (this.bswvReplyOverride !== undefined) return this.bswvReplyOverride;
+      const ch = this.channels[bswvQuery[1] as "C1" | "C2"];
+      const h = ch.offset + ch.amp / 2;
+      const l = ch.offset - ch.amp / 2;
+      return `${bswvQuery[1]}:BSWV WVTP,SINE,FRQ,1000HZ,PERI,0.001S,AMP,${ch.amp}V,AMPVRMS,${(ch.amp / 2.828).toFixed(4)}Vrms,OFST,${ch.offset}V,HLEV,${h}V,LLEV,${l}V,PHSE,0`;
+    }
+
+    const bswvSet = /^(C[12]):BSWV (.+)$/.exec(upper);
+    if (bswvSet) {
+      const ch = this.channels[bswvSet[1] as "C1" | "C2"];
+      const t = bswvSet[2].split(",").map((p) => p.trim());
+      let hlev: number | undefined;
+      let llev: number | undefined;
+      for (let i = 0; i + 1 < t.length; i += 2) {
+        const v = Number(t[i + 1]);
+        if (t[i] === "AMP") ch.amp = v;
+        else if (t[i] === "OFST") ch.offset = v;
+        else if (t[i] === "HLEV") hlev = v;
+        else if (t[i] === "LLEV") llev = v;
+      }
+      if (hlev !== undefined || llev !== undefined) {
+        const hi = hlev ?? ch.offset + ch.amp / 2;
+        const lo = llev ?? ch.offset - ch.amp / 2;
+        ch.amp = hi - lo;
+        ch.offset = (hi + lo) / 2;
       }
       return undefined;
     }

@@ -1,8 +1,11 @@
 import * as net from "node:net";
 import {
   assertIsQuery,
+  assertReadbackWithinLimits,
   assertWireSafe,
   assertWithinLimits,
+  hasLimits,
+  outputOnChannel,
   type OutputLimits,
 } from "./security/scpi-guard.js";
 
@@ -130,6 +133,16 @@ export class SiglentConnection {
     assertWireSafe(cmd);
     assertWithinLimits(cmd, this.outputLimits);
     this.ensureConnected();
+
+    // Before energizing an output, verify what the instrument will actually
+    // output. Limits on individual commands can't see front-panel changes,
+    // settings made before the server started, or combined effects.
+    const channel = hasLimits(this.outputLimits) ? outputOnChannel(cmd) : undefined;
+    if (channel) {
+      const reply = await this.query(`${channel}:BSWV?`);
+      assertReadbackWithinLimits(reply, this.outputLimits);
+    }
+
     return new Promise((resolve, reject) => {
       this.socket!.write(cmd + "\n", (err) => {
         if (err) reject(new Error(`Write failed: ${err.message}`));

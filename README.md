@@ -378,7 +378,9 @@ What the server enforces, regardless of what the model was told:
 | **`scpi_query` is query-only**: the command must be a single header ending in `?` | Using the "read-only" tool to change state (`scpi_query("C1:OUTP ON")`) |
 | **Raw `scpi_command` is off by default** | An unrestricted command channel to the instrument |
 | **Connect allowlist**: `connect` only reaches `SIGLENT_SDG_IP`, `SIGLENT_ALLOWED_HOSTS`, or (if neither is set) private-LAN IP addresses, and only the instrument port | Using the server as a TCP client to reach other services, e.g. `169.254.169.254` |
-| **Optional output limits** (`SIGLENT_MAX_AMPLITUDE_VPP`, `SIGLENT_MAX_VOLTAGE`) checked on every waveform command, from any tool | Exceeding what your circuit can take |
+| **Optional output limits** (`SIGLENT_MAX_AMPLITUDE_VPP`, `SIGLENT_MAX_VOLTAGE`) checked on every waveform command, from any tool, including the span between high and low level | Exceeding what your circuit can take |
+| With limits set: **`reset` and `copy_channel` are blocked** | Loading unchecked settings (the 4 Vpp default, or the other channel's settings) |
+| With limits set: **read-back before switching an output on** (`Cn:BSWV?`); refuses if anything is over the limit or the reply can't be parsed | Energizing settings made on the front panel, before the server started, or through a combination of individually valid changes |
 
 Output limits and raw SCPI are mutually exclusive: a raw command channel can't be held to a limit (SCPI has long-form headers and model-specific commands), so `SIGLENT_ALLOW_RAW_SCPI` is ignored when limits are set.
 

@@ -8,15 +8,21 @@ import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SdgSimulator, SIM_IDN } from "../simulator/sdg-simulator.js";
 import { createTestServer, callTool, getText } from "../helpers.js";
 
-/** A tool call is rejected if the server throws (protocol error) or returns isError. */
+/**
+ * A tool call is rejected if the server throws (protocol error) or returns
+ * isError. Only the call itself is inside try/catch: the assertion must stay
+ * outside, or a successful call would turn into a caught assertion error and
+ * the test would pass anyway.
+ */
 async function expectRejected(client: Client, name: string, args: Record<string, unknown>) {
+  let result: Awaited<ReturnType<typeof callTool>>;
   try {
-    const result = await callTool(client, name, args);
-    expect(result.isError, `expected ${name} to be rejected, got: ${getText(result)}`).toBe(true);
-    return getText(result);
+    result = await callTool(client, name, args);
   } catch (err) {
     return err instanceof Error ? err.message : String(err);
   }
+  expect(result.isError, `expected ${name} to be rejected, got: ${getText(result)}`).toBe(true);
+  return getText(result);
 }
 
 let sim: SdgSimulator;
@@ -51,7 +57,7 @@ async function connectedServer(extra: Record<string, string> = {}) {
   const res = await callTool(ctx.client, "connect");
   expect(getText(res)).toContain(SIM_IDN);
   sim.clear();
-  sim.channels.C1.output = "OFF";
+  sim.resetState();
   return ctx;
 }
 
@@ -66,7 +72,7 @@ describe("default configuration", () => {
   });
   beforeEach(() => {
     sim.clear();
-    sim.channels.C1.output = "OFF";
+    sim.resetState();
   });
 
   it("does not expose the raw scpi_command tool", async () => {
@@ -87,7 +93,24 @@ describe("default configuration", () => {
     expect(await wire(ctx.client)).toEqual(["C1:BSWV WVTP,SINE,FRQ,1000,AMP,2"]);
   });
 
+  it("switches an output on without a read-back when no limits are configured", async () => {
+    const res = await callTool(ctx.client, "configure_output", { channel: "C1", state: "ON" });
+    expect(res.isError).toBeFalsy();
+    expect(await wire(ctx.client)).toEqual(["C1:OUTP ON"]);
+  });
+
+  it("allows reset and channel copy when no limits are configured", async () => {
+    await callTool(ctx.client, "reset");
+    await callTool(ctx.client, "copy_channel", { source: "C2", destination: "C1" });
+    expect(await wire(ctx.client)).toEqual(["*RST", "PACP C1,C2"]);
+  });
+
   describe("F1: scpi_query cannot change instrument state", () => {
+    it("accepts an absolute query with a leading root colon", async () => {
+      const res = await callTool(ctx.client, "scpi_query", { command: ":SENSe:COUNTer:FREQuency?" });
+      expect(res.isError).toBeFalsy();
+    });
+
     it("answers a real query", async () => {
       const res = await callTool(ctx.client, "scpi_query", { command: "C1:OUTP?" });
       expect(getText(res)).toBe("C1:OUTP OFF,LOAD,HZ,PLRT,NOR");
@@ -166,7 +189,10 @@ describe("raw SCPI explicitly enabled", () => {
   afterAll(async () => {
     await ctx.cleanup();
   });
-  beforeEach(() => sim.clear());
+  beforeEach(() => {
+    sim.clear();
+    sim.resetState();
+  });
 
   it("exposes scpi_command and sends a single command", async () => {
     const res = await callTool(ctx.client, "scpi_command", { command: "C1:OUTP ON" });
@@ -196,11 +222,60 @@ describe("F4: output limits", () => {
   afterAll(async () => {
     await ctx.cleanup();
   });
-  beforeEach(() => sim.clear());
+  beforeEach(() => {
+    sim.clear();
+    sim.resetState();
+  });
 
   it("drops scpi_command even though it was requested", async () => {
     const { tools } = await ctx.client.listTools();
     expect(tools.map((t) => t.name)).not.toContain("scpi_command");
+  });
+
+  it("accepts high/low levels whose span is within the limit", async () => {
+    const res = await callTool(ctx.client, "configure_basic_wave", { channel: "C1", high_level: 2, low_level: -2 });
+    expect(res.isError).toBeFalsy();
+    expect(await wire(ctx.client)).toEqual(["C1:BSWV HLEV,2,LLEV,-2"]);
+  });
+
+  describe("read-back before switching an output on", () => {
+    it("switches on when the instrument's settings are within limits", async () => {
+      // Simulator default is 4 Vpp, 0 V: within 5 Vpp / ±3 V.
+      const res = await callTool(ctx.client, "configure_output", { channel: "C1", state: "ON" });
+      expect(res.isError).toBeFalsy();
+      expect(await wire(ctx.client)).toEqual(["C1:BSWV?", "C1:OUTP ON"]);
+      expect(sim.channels.C1.output).toBe("ON");
+    });
+
+    it("refuses when the amplitude was set over the limit outside the server (e.g. front panel)", async () => {
+      sim.channels.C1.amp = 8;
+      const text = await expectRejected(ctx.client, "configure_output", { channel: "C1", state: "ON", load: "50" });
+      expect(text).toMatch(/Output not switched on/);
+      expect(await wire(ctx.client)).toEqual(["C1:BSWV?"]);
+      expect(sim.channels.C1.output).toBe("OFF");
+    });
+
+    it("refuses when individually valid changes combine to an over-limit peak", async () => {
+      // amplitude 5 then offset 2.5 are each within 5 Vpp / ±3 V, but the peak is 5 V.
+      await callTool(ctx.client, "configure_basic_wave", { channel: "C1", amplitude: 5 });
+      await callTool(ctx.client, "configure_basic_wave", { channel: "C1", offset: 2.5 });
+      const text = await expectRejected(ctx.client, "configure_output", { channel: "C1", state: "ON" });
+      expect(text).toMatch(/HLEV 5 V exceeds/);
+      expect(sim.channels.C1.output).toBe("OFF");
+    });
+
+    it("fails closed when the read-back can't be parsed", async () => {
+      sim.bswvReplyOverride = "C1:BSWV GARBAGE";
+      const text = await expectRejected(ctx.client, "configure_output", { channel: "C1", state: "ON" });
+      expect(text).toMatch(/Cannot verify/);
+      expect(sim.channels.C1.output).toBe("OFF");
+    });
+
+    it("needs no read-back to switch an output off", async () => {
+      const res = await callTool(ctx.client, "configure_output", { channel: "C1", state: "OFF" });
+      expect(res.isError).toBeFalsy();
+      expect(await wire(ctx.client)).toEqual(["C1:OUTP OFF"]);
+    });
   });
 
   it("allows output within limits", async () => {
@@ -214,6 +289,10 @@ describe("F4: output limits", () => {
   });
 
   it.each([
+    ["reset (recalls 4 Vpp default)", "reset", {}],
+    ["channel copy (other channel may be over the limit)", "copy_channel", { source: "C2", destination: "C1" }],
+    ["high/low span over the amplitude limit", "configure_basic_wave", { channel: "C1", high_level: 3, low_level: -3 }],
+    ["a single level while an amplitude limit is set", "configure_basic_wave", { channel: "C1", high_level: 2 }],
     ["basic amplitude", "configure_basic_wave", { channel: "C1", amplitude: 20 }],
     ["basic offset", "configure_basic_wave", { channel: "C1", offset: 4 }],
     ["amplitude in Vrms", "configure_basic_wave", { channel: "C1", amplitude_vrms: 1 }],
