@@ -25,8 +25,17 @@ export class SiglentConnection {
   private headerParsed = false;
   private queryQueue: QueuedQuery[] = [];
   private queryRunning = false;
+  /**
+   * Incremented on every connect(). An attempt that has been superseded by a
+   * newer one (e.g. auto-connect still initializing when the `connect` tool is
+   * called) must not touch the shared socket, and must not disconnect it.
+   */
+  private connectGeneration = 0;
 
   async connect(host: string, port: number = DEFAULT_PORT): Promise<string> {
+    const generation = ++this.connectGeneration;
+    const superseded = () => generation !== this.connectGeneration;
+
     if (this.socket) {
       this.disconnect();
     }
@@ -44,6 +53,11 @@ export class SiglentConnection {
 
       socket.on("connect", async () => {
         clearTimeout(connectTimeout);
+        if (superseded()) {
+          socket.destroy();
+          reject(new Error("Connection attempt superseded by a newer connect."));
+          return;
+        }
         socket.removeAllListeners("error");
         this.socket = socket;
         this.setupSocketListeners();
@@ -51,6 +65,7 @@ export class SiglentConnection {
         try {
           // Drain any welcome banner
           await this.delay(200);
+          if (superseded()) throw new Error("superseded by a newer connect");
           this.dataBuffer = Buffer.alloc(0);
 
           // Try to set CHDR OFF for clean responses (not all SDG models support it)
@@ -60,12 +75,16 @@ export class SiglentConnection {
           } catch {
             // Some models don't support CHDR — that's OK
           }
+          if (superseded()) throw new Error("superseded by a newer connect");
 
           // Query identification
           const idn = await this.query("*IDN?");
+          if (superseded()) throw new Error("superseded by a newer connect");
           resolve(idn);
         } catch (err) {
-          this.disconnect();
+          // Only the current attempt may tear down the shared connection;
+          // a superseded one would otherwise kill the newer socket.
+          if (!superseded()) this.disconnect();
           reject(
             new Error(
               `Connected but failed to initialize: ${err instanceof Error ? err.message : String(err)}`

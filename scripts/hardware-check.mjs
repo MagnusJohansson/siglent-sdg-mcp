@@ -12,7 +12,9 @@
  *   changed frequency, not an energized output.
  * - Safety net: the output state is read after every probe. If it is ever ON,
  *   the script switches it OFF immediately and aborts.
- * - Aborts if C1 output is already ON. Works on C1 only, amplitude 1 Vpp.
+ * - Aborts unless BOTH outputs are OFF: with channel coupling or tracking
+ *   enabled on the instrument, a C1 change can propagate to C2. Works on C1
+ *   only, amplitude 1 Vpp.
  * - Changes C1 waveform, load and burst settings. Restore them from the
  *   front panel afterwards if needed.
  *
@@ -61,19 +63,23 @@ async function startServer(extraEnv = {}) {
   return { client, call, conn };
 }
 
-/** Read C1 output state; returns "ON", "OFF" or the raw text if unparseable. */
-async function outputState(call) {
-  const r = await call("get_output", { channel: "C1" });
+/** Read a channel's output state; returns "ON", "OFF" or the raw text if unparseable. */
+async function outputState(call, channel = "C1") {
+  const r = await call("get_output", { channel });
   const m = /OUTP\s+(ON|OFF)|^(ON|OFF)/.exec(r.text);
   return m ? m[1] ?? m[2] : r.text;
 }
 
-/** Safety net: if C1 output is anything but OFF, switch it off and abort. */
+/**
+ * Safety net: if either output is anything but OFF, switch both off and abort.
+ * Both are checked because coupling/tracking can carry a C1 change to C2.
+ */
 async function assertOffOrAbort(s, context) {
-  const state = await outputState(s.call);
-  if (state === "OFF") return;
+  const states = { C1: await outputState(s.call, "C1"), C2: await outputState(s.call, "C2") };
+  if (states.C1 === "OFF" && states.C2 === "OFF") return;
   await s.call("configure_output", { channel: "C1", state: "OFF" });
-  console.log(`\n  ABORT: C1 output read "${state}" after ${context}. Switched it OFF. A guard has regressed.`);
+  await s.call("configure_output", { channel: "C2", state: "OFF" });
+  console.log(`\n  ABORT: outputs read C1=${states.C1}, C2=${states.C2} after ${context}. Switched both OFF.`);
   await s.client.close();
   process.exit(1);
 }
@@ -93,13 +99,16 @@ async function main() {
   check("connect + identify", s.conn.ok && /SDG/i.test(s.conn.text), s.conn.text.split("\n").pop());
   if (!s.conn.ok) throw new Error("Cannot connect; aborting.");
 
-  const initial = await outputState(s.call);
-  if (initial !== "OFF") {
-    console.log(`\n  ABORT: C1 output is ${initial}. Turn it OFF on the front panel and re-run.`);
+  const initial = { C1: await outputState(s.call, "C1"), C2: await outputState(s.call, "C2") };
+  if (initial.C1 !== "OFF" || initial.C2 !== "OFF") {
+    console.log(
+      `\n  ABORT: outputs are C1=${initial.C1}, C2=${initial.C2}. Both must be OFF ` +
+        "(coupling or tracking can carry C1 changes to C2). Turn them OFF and re-run."
+    );
     await s.client.close();
     process.exit(1);
   }
-  console.log(`  info  C1 output is OFF; initial BSWV: ${(await s.call("get_basic_wave", { channel: "C1" })).text}`);
+  console.log(`  info  both outputs OFF; C1 initial BSWV: ${(await s.call("get_basic_wave", { channel: "C1" })).text}`);
 
   // Functional regression: the hardware accepts what the tools generate.
   console.log("\n  Functional");
@@ -150,7 +159,9 @@ async function main() {
   const tools = (await s.client.listTools()).tools.map((t) => t.name);
   check("scpi_command not exposed by default", !tools.includes("scpi_command"), `${tools.length} tools`);
 
-  r = await s.call("connect", { host: "192.168.1.1" });
+  // Any private-LAN address that isn't the instrument under test.
+  const probeHost = ["192.168.1.1", "192.168.1.2"].find((h) => h !== ip);
+  r = await s.call("connect", { host: probeHost });
   const still = await s.call("identify");
   check("F3 connect to another LAN host rejected, session intact", !r.ok && still.ok, r.text.slice(0, 70));
 

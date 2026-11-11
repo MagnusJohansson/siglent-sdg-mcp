@@ -407,7 +407,7 @@ npm test            # Unit tests + end-to-end tests against the SCPI simulator
 
 The end-to-end tests run the real server and connection code over a real TCP socket against a small SCPI simulator (`tests/simulator/`), so no hardware is needed. Security tests assert on what actually reached the simulator, not only on the error returned.
 
-To check against real hardware (never turns an output on, aborts if C1 output is already on, uses 1 Vpp on C1, and changes C1's waveform settings):
+To check against real hardware (never turns an output on, aborts unless both outputs are off, because channel coupling can carry C1 changes to C2, uses 1 Vpp on C1, and changes C1's waveform settings):
 
 ```bash
 npm run hardware-check -- 192.168.1.126

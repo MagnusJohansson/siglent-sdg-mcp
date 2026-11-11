@@ -23,6 +23,10 @@ Server-side output voltage limits were developed for this release but **removed 
 - `connect` could be used to open TCP connections to arbitrary hosts and ports.
 - `scpi_query` accepted parameters after `?` (`C1:BSWV? AMP,10`) and `*RST?`-style forms of action commands.
 
+### Fixed
+
+- Calling `connect` while auto-connect (`SIGLENT_SDG_IP`) was still initializing could leave the server disconnected: the older attempt's error path closed the newer connection. A superseded connect attempt now leaves the newer one alone.
+
 ### Added
 
 - `scpi_query` accepts absolute queries with a leading root colon (e.g. `:SENSe:COUNTer:FREQuency?`). Parameters after `?` are only accepted for `STL?` and `MMEMory:CATalog?`, in their documented forms. `WVDT?` (binary reply) is not accepted. `*` commands are only accepted as pure queries (`*IDN?`, `*OPC?`, `*ESR?`, `*STB?`, `*ESE?`, `*SRE?`, `*OPT?`).
