@@ -32,8 +32,14 @@ describe("assertIsQuery", () => {
     "C1:BSWV?",
     "c1:outp?",
     ":SENSe:COUNTer:FREQuency?",
-    "WVDT? USER,wave1",
+    "STL?",
     "STL? BUILDIN",
+    "STL? USER",
+    'STL? USER,"net_storage/wave"',
+    'MMEMory:CATalog? "Local"',
+    'MMEM:CAT? "Local"',
+    'MMEMory:CATalog:DATA:ARBitrary? "Local"',
+    'MMEM:CAT:STAT:XML? "Local"',
   ])("accepts query %s", (cmd) => {
     expect(() => assertIsQuery(cmd)).not.toThrow();
   });
@@ -55,6 +61,12 @@ describe("assertIsQuery", () => {
     ["reset in query form", "*RST?"],
     ["self-test in query form", "*TST?"],
     ["clear status in query form", "*CLS?"],
+    ["WVDT? (binary reply; parameters overlap the WVDT setter)", "WVDT? USER,wave1"],
+    ["setter-shaped WVDT? parameters", "WVDT? WVNM,x,WAVEDATA,AAAA"],
+    ["undocumented STL? parameters", "STL? WVNM,x"],
+    ["STL? path without quotes", "STL? USER,net_storage"],
+    ["MMEM catalog without a quoted path", "MMEM:CAT? Local"],
+    ["parameters on a query that takes none", 'C1:BSWV? "Local"'],
   ])("rejects %s", (_label, cmd) => {
     expect(() => assertIsQuery(cmd)).toThrow(ScpiPolicyError);
   });

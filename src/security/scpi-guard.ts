@@ -57,12 +57,30 @@ export function assertWireSafe(cmd: string): void {
 const QUERY_PATTERN = /^(\*|:)?([A-Za-z][A-Za-z0-9_:]*)\?(?: ([A-Za-z0-9_,.+\-"/ ]*))?$/;
 
 /**
- * Queries that legitimately take parameters after the '?'. For any other
+ * Queries that legitimately take parameters after the '?', each with the
+ * exact parameter shapes the SDG programming guide documents. For any other
  * query, trailing parameters are rejected: whether the instrument ignores
  * them or acts on them ("C1:BSWV? FRQ,1234") is firmware-dependent, so they
  * are not allowed through a tool that promises to be read-only.
+ *
+ * WVDT? is deliberately absent: its reply is binary waveform data, which the
+ * text query path can't frame, and its parameters overlap the WVDT setter.
  */
-const QUERIES_WITH_PARAMETERS = new Set(["WVDT", "WAVEFORMDATA", "STL", "STORELIST"]);
+const QUOTED_PATH = '"[A-Za-z0-9_\\-./ ]{1,64}"';
+const QUERY_PARAMETER_RULES: Array<{ name: string; header: RegExp; params: RegExp }> = [
+  {
+    // STL?, STL? BUILDIN, STL? USER, STL? USER,"net_storage/wave"
+    name: "STL?",
+    header: /^(STL|STORELIST)$/i,
+    params: new RegExp(`^(BUILDIN|USER(,${QUOTED_PATH})?)$`, "i"),
+  },
+  {
+    // MMEMory:CATalog? "Local" (and the :DATA:ARBitrary / :STATe:XMLanguage variants)
+    name: "MMEMory:CATalog?",
+    header: /^MMEM(ORY)?:CAT(ALOG)?(:DATA:ARB(ITRARY)?|:STAT(E)?:XML(ANGUAGE)?)?$/i,
+    params: new RegExp(`^${QUOTED_PATH}$`),
+  },
+];
 
 /**
  * IEEE 488.2 common commands that are pure queries. Others that accept a '?'
@@ -88,10 +106,18 @@ export function assertIsQuery(cmd: string): void {
         `${[...COMMON_QUERIES].map((q) => `*${q}?`).join(", ")} are permitted.`
     );
   }
-  if (params !== undefined && params.trim() !== "" && !QUERIES_WITH_PARAMETERS.has(name)) {
-    throw new ScpiPolicyError(
-      `Parameters after '?' are only allowed for ${[...QUERIES_WITH_PARAMETERS].join(", ")} queries. ` +
-        `"${cmd}" could be interpreted as a command by the instrument.`
-    );
+  if (params !== undefined && params.trim() !== "") {
+    const rule = QUERY_PARAMETER_RULES.find((r) => r.header.test(header));
+    if (!rule) {
+      throw new ScpiPolicyError(
+        `Parameters after '?' are only allowed for ${QUERY_PARAMETER_RULES.map((r) => r.name).join(", ")}. ` +
+          `"${cmd}" could be interpreted as a command by the instrument.`
+      );
+    }
+    if (!rule.params.test(params.trim())) {
+      throw new ScpiPolicyError(
+        `Parameters "${params.trim()}" are not a documented form for ${rule.name}.`
+      );
+    }
   }
 }

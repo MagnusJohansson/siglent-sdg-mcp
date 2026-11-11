@@ -1,8 +1,8 @@
 /**
  * Connect-target policy.
  *
- * The `connect` tool lets the model choose a host and port. Without limits,
- * that plus a raw-command tool is a general-purpose TCP client: the model
+ * The `connect` tool lets the model choose a host and port. Without host and
+ * port restrictions, that plus a raw-command tool is a general-purpose TCP client: the model
  * (or anyone who can steer it via prompt injection) could reach any service
  * the server can reach and write arbitrary lines to it.
  */

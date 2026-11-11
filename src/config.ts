@@ -51,12 +51,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   // Raw SCPI turns `connect` into a general command channel. Without an
   // explicit host list, `connect` falls back to "any private-LAN IP on the
   // instrument port", which also matches bench power supplies and electronic
-  // loads (they commonly use 5025 too). So raw SCPI requires explicit hosts.
+  // loads (they commonly use 5025 too). So raw SCPI requires named hosts,
+  // and "*" doesn't name one.
   const rawScpiEnabled = isTrue(env.SIGLENT_ALLOW_RAW_SCPI);
-  if (rawScpiEnabled && allowedHosts.length === 0) {
+  if (rawScpiEnabled && (allowedHosts.length === 0 || allowedHosts.includes("*"))) {
     throw new Error(
-      "SIGLENT_ALLOW_RAW_SCPI requires SIGLENT_SDG_IP or SIGLENT_ALLOWED_HOSTS, so raw " +
-        "commands can only reach instruments you have named."
+      "SIGLENT_ALLOW_RAW_SCPI requires SIGLENT_SDG_IP or SIGLENT_ALLOWED_HOSTS naming specific " +
+        "hosts ('*' is not accepted), so raw commands can only reach instruments you have named."
     );
   }
   if (rawScpiEnabled) {

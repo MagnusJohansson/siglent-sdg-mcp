@@ -109,7 +109,7 @@ Replace `/path/to/siglent-sdg-mcp` with the actual path to your clone.
 | `SIGLENT_SDG_PORT` | No | `5025` | TCP port (only change if your setup differs) |
 | `SIGLENT_PORT` | No | `5025` | Fallback if `SIGLENT_SDG_PORT` is not set |
 | `SIGLENT_ALLOWED_HOSTS` | No | — | Comma-separated hosts the `connect` tool may use, in addition to `SIGLENT_SDG_IP`. `*` allows any host (not recommended). See [Security](#security) |
-| `SIGLENT_ALLOW_RAW_SCPI` | No | `false` | Register the raw `scpi_command` tool. Requires `SIGLENT_SDG_IP` or `SIGLENT_ALLOWED_HOSTS` |
+| `SIGLENT_ALLOW_RAW_SCPI` | No | `false` | Register the raw `scpi_command` tool. Requires `SIGLENT_SDG_IP` or `SIGLENT_ALLOWED_HOSTS` naming specific hosts (`*` is not accepted) |
 
 ### Auto-Connect Behavior
 
@@ -373,12 +373,12 @@ What the server enforces, regardless of what the model was told:
 |-----------|------------------|
 | **Command-boundary check** on every string written to the socket: no control characters (incl. newlines), no `;`, ASCII only, max 512 chars | Smuggling extra SCPI commands through any parameter (`load: "50\nC1:OUTP ON"`) |
 | **Strict parameter formats** for the free-text parameters (`load`, `cycles`, arbitrary waveform `name`) | Breaking out of a parameter or a quoted string |
-| **`scpi_query` is query-only**: a single header ending in `?`; parameters after `?` only for queries that take them (`WVDT?`, `STL?`); common commands only as pure queries (`*IDN?`, `*OPC?`, ...) | Using the "read-only" tool to change state (`scpi_query("C1:OUTP ON")`, `"C1:BSWV? AMP,10"`, `"*RST?"`) |
-| **Raw `scpi_command` is off by default**, and can only be enabled together with a named instrument host | An unrestricted command channel to the instrument, or to other SCPI devices on the LAN (power supplies often use port 5025 too) |
+| **`scpi_query` is query-only**: a single header ending in `?`; parameters after `?` only for queries documented to take them (`STL?`, `MMEMory:CATalog?`), and only in their documented forms; common commands only as pure queries (`*IDN?`, `*OPC?`, ...) | Using the "read-only" tool to change state (`scpi_query("C1:OUTP ON")`, `"C1:BSWV? AMP,10"`, `"*RST?"`) |
+| **Raw `scpi_command` is off by default**, and can only be enabled together with named instrument hosts (`*` is not accepted) | An unrestricted command channel to the instrument, or to other SCPI devices on the LAN (power supplies often use port 5025 too) |
 | **Connect allowlist**: `connect` only reaches `SIGLENT_SDG_IP`, `SIGLENT_ALLOWED_HOSTS`, or (if neither is set) private-LAN IP addresses, and only the instrument port | Using the server as a TCP client to reach other services, e.g. `169.254.169.254` |
 **What it does not protect against:**
 
-- **Output voltage.** This server does **not** limit amplitude or offset. The model can set anything the generator allows, up to 20 Vpp. To protect a circuit, set the generator's own limit on the front panel or with `C1:BSWV MAX_OUTPUT_AMP,<Vpp>` (on models that support it). Server-side limits are being designed separately: a first version was reviewed and found to be bypassable, so it isn't shipped (see the threat model).
+- **Output voltage.** This server does **not** limit amplitude or offset. The model can set anything the generator allows, up to 20 Vpp. To protect a circuit, set the generator's own limit on the front panel or with `C1:BSWV MAX_OUTPUT_AMP,<Vpp>` (on models that support it). **This backstop only holds while raw SCPI is off**: with `SIGLENT_ALLOW_RAW_SCPI=true`, the model can send `MAX_OUTPUT_AMP` itself and raise the limit. Whether `reset` (`*RST`) restores the generator's default limit isn't documented; check it on your model before relying on the backstop. Server-side limits are being designed separately: a first version was reviewed and found to be bypassable, so it isn't shipped (see the threat model).
 - **Other clients on port 5025.** Anyone with network access to the instrument can control it directly, without going through this server. The instrument has no authentication. Network segmentation is the control for that.
 
 The full threat model, including residual risks, is in [docs/threat-model.md](docs/threat-model.md).
@@ -407,7 +407,7 @@ npm test            # Unit tests + end-to-end tests against the SCPI simulator
 
 The end-to-end tests run the real server and connection code over a real TCP socket against a small SCPI simulator (`tests/simulator/`), so no hardware is needed. Security tests assert on what actually reached the simulator, not only on the error returned.
 
-To check against real hardware (never turns an output on, aborts if C1 output is already on, uses at most 2 Vpp on C1, and changes C1's waveform settings):
+To check against real hardware (never turns an output on, aborts if C1 output is already on, uses 1 Vpp on C1, and changes C1's waveform settings):
 
 ```bash
 npm run hardware-check -- 192.168.1.126

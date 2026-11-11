@@ -33,6 +33,15 @@ describe("loadConfig", () => {
     expect(loadConfig({ SIGLENT_ALLOWED_HOSTS: "10.0.0.6", SIGLENT_ALLOW_RAW_SCPI: "true" }).rawScpiEnabled).toBe(true);
   });
 
+  it("does not accept '*' as naming a host for raw SCPI", () => {
+    expect(() => loadConfig({ SIGLENT_ALLOWED_HOSTS: "*", SIGLENT_ALLOW_RAW_SCPI: "true" })).toThrow(/'\*' is not accepted/);
+    expect(() =>
+      loadConfig({ SIGLENT_SDG_IP: "192.168.1.126", SIGLENT_ALLOWED_HOSTS: "*", SIGLENT_ALLOW_RAW_SCPI: "true" })
+    ).toThrow(/'\*' is not accepted/);
+    // '*' on its own (raw SCPI off) is still allowed, with a warning.
+    expect(loadConfig({ SIGLENT_ALLOWED_HOSTS: "*" }).notes.join(" ")).toMatch(/any host/);
+  });
+
   it.each([
     ["SIGLENT_SDG_PORT", "70000"],
     ["SIGLENT_SDG_PORT", "50.5"],

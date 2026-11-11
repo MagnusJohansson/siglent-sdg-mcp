@@ -3,7 +3,6 @@ import { assertIsQuery, assertWireSafe } from "./security/scpi-guard.js";
 
 const DEFAULT_PORT = 5025;
 const DEFAULT_TIMEOUT = 5000;
-const BINARY_TIMEOUT = 30000;
 
 interface QueuedQuery {
   cmd: string;
@@ -132,15 +131,6 @@ export class SiglentConnection {
     this.ensureConnected();
     const buf = await this.enqueueQuery(cmd, false, timeout);
     return buf.toString("utf-8").trim();
-  }
-
-  async queryBinary(
-    cmd: string,
-    timeout: number = BINARY_TIMEOUT
-  ): Promise<Buffer> {
-    assertWireSafe(cmd);
-    this.ensureConnected();
-    return this.enqueueQuery(cmd, true, timeout);
   }
 
   private enqueueQuery(

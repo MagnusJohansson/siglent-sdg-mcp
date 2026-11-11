@@ -66,6 +66,12 @@ Review findings that apply to the code that was kept, all fixed in 2.0.0:
 | R7 | `scpi_query` accepted parameters after `?` and `*RST?`-style forms. | See F1. |
 | R9 | Without named hosts, raw SCPI could reach any SCPI device on the LAN on port 5025. | See F3. |
 
+A third review of the withdrawal commit found no remaining way to change state through `scpi_query`. It did find four further issues, all fixed:
+- `SIGLENT_ALLOWED_HOSTS=*` satisfied the named-hosts rule for raw SCPI. `*` is now rejected for it.
+- The parameter allowlist was too loose. `STL?` and `MMEMory:CATalog?` now accept only their documented parameter forms.
+- `WVDT?` is no longer accepted. Its reply is binary, which the text query path can't frame, and its parameters overlap the `WVDT` setter.
+- The unused `queryBinary` path, which had no query-shape check, was removed.
+
 ## Design principle
 
 **One choke point, closest to the wire.** All checks that guard the instrument run in `connection.ts`, after a tool has built its command and before it's written. A new tool, or a bug in an existing one, can't skip them. Per-tool schema validation sits on top as an extra layer, not instead.
@@ -74,13 +80,14 @@ Review findings that apply to the code that was kept, all fixed in 2.0.0:
 
 | Risk | Status |
 |------|--------|
-| **No limit on output voltage.** The model can set any amplitude and offset the generator allows (up to 20 Vpp on an SDG1032X), and switch the output on. | Deferred to the output-limits redesign. Backstop now: set the generator's own `MAX_OUTPUT_AMP` (front panel or `C1:BSWV MAX_OUTPUT_AMP,<Vpp>`). |
+| **No limit on output voltage.** The model can set any amplitude and offset the generator allows (up to 20 Vpp on an SDG1032X), and switch the output on. | Deferred to the output-limits redesign. Backstop now: set the generator's own `MAX_OUTPUT_AMP` (front panel or `C1:BSWV MAX_OUTPUT_AMP,<Vpp>`). The backstop only holds while raw SCPI is off: with raw SCPI on, the model can raise it. Whether `*RST` resets it isn't documented and hasn't been verified. |
 | **Turning the output on needs no confirmation.** | Planned: human-in-the-loop confirmation (MCP elicitation) for physical actions. |
 | **The instrument itself has no authentication.** Anyone who can reach TCP 5025 controls it directly and bypasses this server entirely. | Out of the server's control. Mitigation: network segmentation (instrument VLAN, host firewall). |
 | **Other clients on port 5025.** The SDG1032X accepts several TCP connections at once. Another client (a second server instance, a script) can change settings underneath this server, and replies can interleave and time out. | Not detectable from the server. Mitigation: one controller per instrument, network segmentation. |
 | **A late reply after a query timeout** is read as the reply to the next query. With the limits removed this is a correctness issue (a wrong answer to the model), not a bypass. | To be fixed with the redesign: reset the connection after a timeout. |
 | **No caller identity in stdio mode.** Whoever can start the process has full access; that is the stdio trust model. | Planned: HTTP transport with OAuth 2.1 (Keycloak as authorization server), per-tool scopes, policy-based authorization. |
 | **No audit trail** of tool calls. | Planned with the HTTP/OAuth work: one structured log line per call, tied to token identity. |
+| **Parameterless action headers in `?` form** (e.g. `EQPHASE?`) pass the query-shape check. Whether the firmware treats them as queries or runs the action is undocumented. | Accepted: such actions (phase alignment) don't energize anything. Possible hardware probe later. |
 | **Prompt injection via instrument responses** (e.g. a crafted waveform name returned by a query). | Low: responses are short and mostly numeric. |
 | **Supply chain:** npm dependencies and base image are not yet pinned by digest, and images are not signed. | Planned: digest pinning, signed images, SBOM and continuous monitoring. |
 
