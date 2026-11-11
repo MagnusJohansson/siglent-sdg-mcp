@@ -10,13 +10,14 @@ This MCP server communicates with Siglent SDG waveform generators via SCPI comma
 
 **Key features:**
 
-- 21 tools covering output control, waveform generation, modulation, sweep, burst, arbitrary waveforms, and more
+- 20 tools covering output control, waveform generation, modulation, sweep, burst, arbitrary waveforms, and more (21 with the opt-in raw SCPI tool)
 - Dual-channel support (C1 and C2)
 - 8 waveform types: sine, square, ramp, pulse, noise, arbitrary, DC, PRBS
 - 8 modulation types: AM, DSB-AM, FM, PM, PWM, ASK, FSK, PSK
 - Auto-connect on startup via environment variable
 - Query queue serializes commands automatically — tools can safely run in parallel
-- Raw SCPI escape hatch for any command not covered by the built-in tools
+- Read-only SCPI query escape hatch; raw SCPI commands are opt-in
+- Security guardrails: command-injection protection, query-only `scpi_query`, connect-target allowlist (see [Security](#security))
 
 ## Compatibility
 
@@ -107,12 +108,14 @@ Replace `/path/to/siglent-sdg-mcp` with the actual path to your clone.
 | `SIGLENT_IP` | No | — | Fallback if `SIGLENT_SDG_IP` is not set |
 | `SIGLENT_SDG_PORT` | No | `5025` | TCP port (only change if your setup differs) |
 | `SIGLENT_PORT` | No | `5025` | Fallback if `SIGLENT_SDG_PORT` is not set |
+| `SIGLENT_ALLOWED_HOSTS` | No | — | Comma-separated hosts the `connect` tool may use, in addition to `SIGLENT_SDG_IP`. `*` allows any host (not recommended). See [Security](#security) |
+| `SIGLENT_ALLOW_RAW_SCPI` | No | `false` | Register the raw `scpi_command` tool. Requires `SIGLENT_SDG_IP` or `SIGLENT_ALLOWED_HOSTS` naming specific hosts (`*` is not accepted) |
 
 ### Auto-Connect Behavior
 
 If `SIGLENT_SDG_IP` (or `SIGLENT_IP`) is set, the server attempts to connect to the generator immediately after starting. This runs in the background and does **not** block the MCP server — Claude can start using other tools right away. If the generator is offline or unreachable, the server logs a warning and you can connect manually later using the `connect` tool.
 
-If neither variable is set, the server starts without a connection. Use the `connect` tool to connect when ready.
+If neither variable is set, the server starts without a connection. Use the `connect` tool to connect when ready. In that case `connect` only accepts private-LAN IP addresses; see [Security](#security).
 
 ## Using with Other AI Clients
 
@@ -296,7 +299,7 @@ ChatGPT Desktop only supports remote HTTPS MCP servers (called "connectors"), no
 
 ## Tools
 
-21 tools across 9 categories.
+20 tools across 9 categories by default; `scpi_command` is only registered when `SIGLENT_ALLOW_RAW_SCPI=true`.
 
 | Category | Tool | Description |
 |----------|------|-------------|
@@ -319,8 +322,8 @@ ChatGPT Desktop only supports remote HTTPS MCP servers (called "connectors"), no
 | | `copy_channel` | Copy all parameters from one channel to another |
 | | `configure_sync` | Configure sync output signal |
 | | `equal_phase` | Synchronize phase of both channels |
-| SCPI | `scpi_query` | Send arbitrary SCPI query and return the response |
-| | `scpi_command` | Send arbitrary SCPI command (no response expected) |
+| SCPI | `scpi_query` | Send a read-only SCPI query (single header ending in `?`) and return the response |
+| | `scpi_command` | *Opt-in.* Send a single raw SCPI command (no response expected) |
 
 ## Example Conversations
 
@@ -360,6 +363,26 @@ ChatGPT Desktop only supports remote HTTPS MCP servers (called "connectors"), no
 >
 > Claude calls `configure_burst` with `channel: "C1"`, `state: "ON"`, `burst_mode: "NCYC"`, `cycles: "5"`, `trigger_source: "EXT"`.
 
+## Security
+
+An MCP server turns a language model's output into actions. For this server those actions are physical: a wrong command can put 20 Vpp into a 3.3 V circuit. Tool arguments are therefore treated as **untrusted input**, whether they came from your request, from a document the model read, or from a prompt injection.
+
+What the server enforces, regardless of what the model was told:
+
+| Guardrail | What it prevents |
+|-----------|------------------|
+| **Command-boundary check** on every string written to the socket: no control characters (incl. newlines), no `;`, ASCII only, max 512 chars | Smuggling extra SCPI commands through any parameter (`load: "50\nC1:OUTP ON"`) |
+| **Strict parameter formats** for the free-text parameters (`load`, `cycles`, arbitrary waveform `name`) | Breaking out of a parameter or a quoted string |
+| **`scpi_query` is query-only**: a single header ending in `?`; parameters after `?` only for queries documented to take them (`STL?`, `MMEMory:CATalog?`), and only in their documented forms; common commands only as pure queries (`*IDN?`, `*OPC?`, ...) | Using the "read-only" tool to change state (`scpi_query("C1:OUTP ON")`, `"C1:BSWV? AMP,10"`, `"*RST?"`) |
+| **Raw `scpi_command` is off by default**, and can only be enabled together with named instrument hosts (`*` is not accepted) | An unrestricted command channel to the instrument, or to other SCPI devices on the LAN (power supplies often use port 5025 too) |
+| **Connect allowlist**: `connect` only reaches `SIGLENT_SDG_IP`, `SIGLENT_ALLOWED_HOSTS`, or (if neither is set) private-LAN IP addresses, and only the instrument port | Using the server as a TCP client to reach other services, e.g. `169.254.169.254` |
+**What it does not protect against:**
+
+- **Output voltage.** This server does **not** limit amplitude or offset. The model can set anything the generator allows, up to 20 Vpp. To protect a circuit, set the generator's own limit on the front panel or with `C1:BSWV MAX_OUTPUT_AMP,<Vpp>` (on models that support it). **This backstop only holds while raw SCPI is off**: with `SIGLENT_ALLOW_RAW_SCPI=true`, the model can send `MAX_OUTPUT_AMP` itself and raise the limit. Whether `reset` (`*RST`) restores the generator's default limit isn't documented; check it on your model before relying on the backstop. Server-side limits are being designed separately: a first version was reviewed and found to be bypassable, so it isn't shipped (see the threat model).
+- **Other clients on port 5025.** Anyone with network access to the instrument can control it directly, without going through this server. The instrument has no authentication. Network segmentation is the control for that.
+
+The full threat model, including residual risks, is in [docs/threat-model.md](docs/threat-model.md).
+
 ## Architecture
 
 ```
@@ -370,6 +393,7 @@ Claude Code <-- stdio/JSON-RPC --> siglent-sdg-mcp <-- TCP/SCPI --> Generator:50
 - **Protocol:** SCPI commands over raw TCP sockets, newline-terminated
 - **Query Queue:** All SCPI queries are serialized through an internal queue. The generator processes one command at a time, so even when tools issue parallel requests, the queue ensures they're sent sequentially.
 - **Auto-Connect:** If `SIGLENT_SDG_IP` is set, connects in the background on startup without blocking the MCP server.
+- **Security choke point:** every command and query passes through `connection.ts`, which applies the checks in `src/security/` before anything is written to the socket.
 
 ## Development
 
@@ -378,7 +402,26 @@ npm run build       # Compile TypeScript
 npm run watch       # Watch mode — recompile on changes
 npm run dev         # Build and run
 npm run inspector   # Launch with MCP Inspector for debugging
+npm test            # Unit tests + end-to-end tests against the SCPI simulator
 ```
+
+The end-to-end tests run the real server and connection code over a real TCP socket against a small SCPI simulator (`tests/simulator/`), so no hardware is needed. Security tests assert on what actually reached the simulator, not only on the error returned.
+
+To check against real hardware (never turns an output on, aborts unless both outputs are off, because channel coupling can carry C1 changes to C2, uses 1 Vpp on C1, and changes C1's waveform settings):
+
+```bash
+npm run hardware-check -- 192.168.1.126
+```
+
+### Releasing
+
+Publishing is triggered by **publishing a GitHub Release**, not by pushing a tag:
+
+1. Bump `version` in `package.json` and add a section to `CHANGELOG.md`, then merge to `main`.
+2. Create a release (draft first) with tag `vX.Y.Z` on `main`, using the changelog section as the release notes.
+3. Publish the release. This runs the npm publish (tests first, with provenance) and the GHCR image build.
+
+The npm workflow fails if the tag doesn't match the `package.json` version. A pre-release publishes to the npm `next` dist-tag, and doesn't move the Docker `latest` tag. A draft release publishes nothing.
 
 ### Docker (local build)
 
@@ -410,8 +453,13 @@ Then use the local image in your `.mcp.json`:
 
 ```
 src/
-  index.ts              # Entry point, MCP server setup
-  connection.ts         # TCP socket manager with query queue
+  index.ts              # Entry point: stdio transport, auto-connect
+  server.ts             # MCP server factory, tool registration
+  config.ts             # Environment parsing, effective security settings
+  connection.ts         # TCP socket manager with query queue (security choke point)
+  security/
+    scpi-guard.ts       # Command-boundary and query-only checks
+    host-policy.ts      # Connect-target allowlist
   tools/
     connection.ts       # connect, disconnect, identify
     output.ts           # get_output, configure_output
@@ -421,7 +469,11 @@ src/
     burst.ts            # get_burst, configure_burst
     arbitrary.ts        # get_arbitrary_wave, set_arbitrary_wave
     utility.ts          # reset, copy_channel, configure_sync, equal_phase
-    scpi.ts             # scpi_query, scpi_command
+    scpi.ts             # scpi_query, scpi_command (opt-in)
+tests/
+  unit/                 # Guard, host policy and config tests
+  integration/          # End-to-end security tests via MCP client
+  simulator/            # SCPI simulator (TCP)
 ```
 
 ## Troubleshooting
@@ -435,11 +487,13 @@ The generator isn't connected yet. Either set `SIGLENT_SDG_IP` in your `.mcp.jso
 - Verify the generator's IP address (check the generator's Utility > Interface menu)
 - Ensure port 5025 is accessible (try `telnet <generator-ip> 5025` from your machine)
 - Check that no firewall is blocking the connection
-- The generator only accepts one TCP connection at a time — close any other SCPI clients
+- Close other SCPI clients (another MCP server instance, a second Claude session, NI-MAX, scripts). The SDG1032X accepts more than one TCP connection, so a second client does not fail to connect. It interferes instead (see below)
 
 ### Query timeout
 
 Some SCPI queries can take a few seconds. The default timeout is 5 seconds. For `scpi_query`, you can increase the timeout with the `timeout_ms` parameter.
+
+Timeouts on queries that normally answer instantly (`identify`, `get_output`) usually mean **another client is talking to the generator at the same time**. A common cause is a second Claude Code session whose MCP config also starts this server with `SIGLENT_SDG_IP` set, so both auto-connect. The server serializes its own queries, but it can't coordinate with other processes, and their commands and replies interleave on the instrument. Close the other client and reconnect.
 
 ### Docker: can't reach the waveform generator
 

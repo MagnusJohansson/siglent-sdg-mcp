@@ -1,8 +1,8 @@
 import * as net from "node:net";
+import { assertIsQuery, assertWireSafe } from "./security/scpi-guard.js";
 
 const DEFAULT_PORT = 5025;
 const DEFAULT_TIMEOUT = 5000;
-const BINARY_TIMEOUT = 30000;
 
 interface QueuedQuery {
   cmd: string;
@@ -25,8 +25,17 @@ export class SiglentConnection {
   private headerParsed = false;
   private queryQueue: QueuedQuery[] = [];
   private queryRunning = false;
+  /**
+   * Incremented on every connect(). An attempt that has been superseded by a
+   * newer one (e.g. auto-connect still initializing when the `connect` tool is
+   * called) must not touch the shared socket, and must not disconnect it.
+   */
+  private connectGeneration = 0;
 
   async connect(host: string, port: number = DEFAULT_PORT): Promise<string> {
+    const generation = ++this.connectGeneration;
+    const superseded = () => generation !== this.connectGeneration;
+
     if (this.socket) {
       this.disconnect();
     }
@@ -44,6 +53,11 @@ export class SiglentConnection {
 
       socket.on("connect", async () => {
         clearTimeout(connectTimeout);
+        if (superseded()) {
+          socket.destroy();
+          reject(new Error("Connection attempt superseded by a newer connect."));
+          return;
+        }
         socket.removeAllListeners("error");
         this.socket = socket;
         this.setupSocketListeners();
@@ -51,6 +65,7 @@ export class SiglentConnection {
         try {
           // Drain any welcome banner
           await this.delay(200);
+          if (superseded()) throw new Error("superseded by a newer connect");
           this.dataBuffer = Buffer.alloc(0);
 
           // Try to set CHDR OFF for clean responses (not all SDG models support it)
@@ -60,12 +75,16 @@ export class SiglentConnection {
           } catch {
             // Some models don't support CHDR — that's OK
           }
+          if (superseded()) throw new Error("superseded by a newer connect");
 
           // Query identification
           const idn = await this.query("*IDN?");
+          if (superseded()) throw new Error("superseded by a newer connect");
           resolve(idn);
         } catch (err) {
-          this.disconnect();
+          // Only the current attempt may tear down the shared connection;
+          // a superseded one would otherwise kill the newer socket.
+          if (!superseded()) this.disconnect();
           reject(
             new Error(
               `Connected but failed to initialize: ${err instanceof Error ? err.message : String(err)}`
@@ -111,7 +130,11 @@ export class SiglentConnection {
   }
 
   async sendCommand(cmd: string): Promise<void> {
+    // The connection is the single choke point to the instrument, so this
+    // check applies regardless of which tool built the command.
+    assertWireSafe(cmd);
     this.ensureConnected();
+
     return new Promise((resolve, reject) => {
       this.socket!.write(cmd + "\n", (err) => {
         if (err) reject(new Error(`Write failed: ${err.message}`));
@@ -121,17 +144,12 @@ export class SiglentConnection {
   }
 
   async query(cmd: string, timeout: number = DEFAULT_TIMEOUT): Promise<string> {
+    // A query must be structurally a query; otherwise "C1:OUTP ON" sent via a
+    // read-only tool would change state and simply time out waiting for a reply.
+    assertIsQuery(cmd);
     this.ensureConnected();
     const buf = await this.enqueueQuery(cmd, false, timeout);
     return buf.toString("utf-8").trim();
-  }
-
-  async queryBinary(
-    cmd: string,
-    timeout: number = BINARY_TIMEOUT
-  ): Promise<Buffer> {
-    this.ensureConnected();
-    return this.enqueueQuery(cmd, true, timeout);
   }
 
   private enqueueQuery(

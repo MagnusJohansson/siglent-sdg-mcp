@@ -1,11 +1,12 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { connection } from "../connection.js";
+import type { ServerConfig } from "../config.js";
 
-export function registerScpiTools(server: McpServer): void {
+export function registerScpiTools(server: McpServer, config: ServerConfig): void {
   server.tool(
     "scpi_query",
-    "Send an arbitrary SCPI query to the waveform generator and return the response. Use this as an escape hatch for commands not covered by other tools. Note: CHDR is set to OFF, so responses contain only values (no headers).",
+    "Send a read-only SCPI query to the waveform generator and return the response. Use this as an escape hatch for queries not covered by other tools. The command must be a single SCPI header ending in '?' (e.g. 'C1:BSWV?'); anything that could change instrument state is rejected. Note: CHDR is set to OFF, so responses contain only values (no headers).",
     {
       command: z
         .string()
@@ -46,9 +47,12 @@ export function registerScpiTools(server: McpServer): void {
     }
   );
 
+  // Raw commands are off by default: they bypass every per-tool constraint.
+  if (!config.rawScpiEnabled) return;
+
   server.tool(
     "scpi_command",
-    "Send an arbitrary SCPI command to the waveform generator (no response expected). Use this as an escape hatch for commands not covered by other tools.",
+    "Send an arbitrary SCPI command to the waveform generator (no response expected). Use this as an escape hatch for commands not covered by other tools. Only one command per call; newlines and ';' are rejected.",
     {
       command: z
         .string()
@@ -56,7 +60,7 @@ export function registerScpiTools(server: McpServer): void {
           "SCPI command to send (e.g. '*RST', 'C1:OUTP ON', 'C1:BSWV WVTP,SINE')"
         ),
     },
-    { readOnlyHint: false },
+    { readOnlyHint: false, destructiveHint: true },
     async ({ command }) => {
       try {
         await connection.sendCommand(command);

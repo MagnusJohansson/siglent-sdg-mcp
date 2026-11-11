@@ -1,9 +1,10 @@
 name: Publish Docker image
 
+# Publishing a GitHub Release is the single trigger for publishing: the
+# release notes exist before anything ships, and a draft publishes nothing.
 on:
-  push:
-    tags:
-      - "v*"
+  release:
+    types: [published]
 
 env:
   REGISTRY: ghcr.io
@@ -38,10 +39,14 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # The semver rules would add "latest" automatically, even for a release
+          # marked as a pre-release. Only the gated raw rule below may set it.
+          flavor: |
+            latest=false
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ !github.event.release.prerelease }}
 
       - name: Build and push
         uses: docker/build-push-action@v6

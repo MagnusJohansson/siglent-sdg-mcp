@@ -1,6 +1,6 @@
 {
   "name": "siglent-sdg-mcp",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "MCP server for Siglent SDG waveform generator control via SCPI over TCP sockets",
   "type": "module",
   "main": "build/index.js",
@@ -19,7 +19,8 @@
     "inspector": "npx @modelcontextprotocol/inspector node build/index.js",
     "prepublishOnly": "npm run build",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "hardware-check": "npm run build && node scripts/hardware-check.mjs"
   },
   "keywords": [
     "mcp",

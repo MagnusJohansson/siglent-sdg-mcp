@@ -1,11 +1,13 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { connection } from "../connection.js";
+import type { ServerConfig } from "../config.js";
+import { assertConnectAllowed } from "../security/host-policy.js";
 
-export function registerConnectionTools(server: McpServer): void {
+export function registerConnectionTools(server: McpServer, config: ServerConfig): void {
   server.tool(
     "connect",
-    "Connect to a Siglent SDG waveform generator over TCP. Returns device identification on success.",
+    "Connect to a Siglent SDG waveform generator over TCP. Returns device identification on success. Only hosts and ports allowed by the server configuration can be used.",
     {
       host: z
         .string()
@@ -20,8 +22,8 @@ export function registerConnectionTools(server: McpServer): void {
     },
     { readOnlyHint: false, openWorldHint: true },
     async ({ host, port }) => {
-      const targetHost =
-        host || process.env.SIGLENT_SDG_IP || process.env.SIGLENT_IP;
+      const targetHost = host || config.defaultHost;
+      const targetPort = port ?? config.defaultPort;
       if (!targetHost) {
         return {
           content: [
@@ -35,12 +37,13 @@ export function registerConnectionTools(server: McpServer): void {
       }
 
       try {
-        const idn = await connection.connect(targetHost, port);
+        assertConnectAllowed(targetHost, targetPort, config.hostPolicy);
+        const idn = await connection.connect(targetHost, targetPort);
         return {
           content: [
             {
               type: "text" as const,
-              text: `Connected to ${targetHost}:${port || 5025}\nDevice: ${idn}`,
+              text: `Connected to ${targetHost}:${targetPort}\nDevice: ${idn}`,
             },
           ],
         };
