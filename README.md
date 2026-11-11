@@ -410,6 +410,12 @@ npm test            # Unit tests + end-to-end tests against the SCPI simulator
 
 The end-to-end tests run the real server and connection code over a real TCP socket against a small SCPI simulator (`tests/simulator/`), so no hardware is needed. Security tests assert on what actually reached the simulator, not only on the error returned.
 
+To check against real hardware (never turns an output on, aborts if C1 output is already on, uses at most 2 Vpp on C1, and changes C1's waveform settings):
+
+```bash
+npm run hardware-check -- 192.168.1.126
+```
+
 ### Docker (local build)
 
 Build the image locally:
@@ -474,11 +480,13 @@ The generator isn't connected yet. Either set `SIGLENT_SDG_IP` in your `.mcp.jso
 - Verify the generator's IP address (check the generator's Utility > Interface menu)
 - Ensure port 5025 is accessible (try `telnet <generator-ip> 5025` from your machine)
 - Check that no firewall is blocking the connection
-- The generator only accepts one TCP connection at a time — close any other SCPI clients
+- Close other SCPI clients (another MCP server instance, a second Claude session, NI-MAX, scripts). The SDG1032X accepts more than one TCP connection, so a second client does not fail to connect. It interferes instead (see below)
 
 ### Query timeout
 
 Some SCPI queries can take a few seconds. The default timeout is 5 seconds. For `scpi_query`, you can increase the timeout with the `timeout_ms` parameter.
+
+Timeouts on queries that normally answer instantly (`identify`, `get_output`) usually mean **another client is talking to the generator at the same time**. A common cause is a second Claude Code session whose MCP config also starts this server with `SIGLENT_SDG_IP` set, so both auto-connect. The server serializes its own queries, but it can't coordinate with other processes, and their commands and replies interleave on the instrument. Close the other client and reconnect.
 
 ### Docker: can't reach the waveform generator
 

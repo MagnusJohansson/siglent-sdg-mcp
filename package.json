@@ -19,7 +19,8 @@
     "inspector": "npx @modelcontextprotocol/inspector node build/index.js",
     "prepublishOnly": "npm run build",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "hardware-check": "npm run build && node scripts/hardware-check.mjs"
   },
   "keywords": [
     "mcp",

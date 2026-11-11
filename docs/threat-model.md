@@ -46,6 +46,7 @@ The raw `scpi_command` tool is also **off by default** now (`SIGLENT_ALLOW_RAW_S
 | Risk | Status |
 |------|--------|
 | **The instrument itself has no authentication.** Anyone who can reach TCP 5025 controls it directly and bypasses this server entirely. | Out of the server's control. Mitigation: network segmentation (instrument VLAN, host firewall). |
+| **Other clients on port 5025.** The SDG1032X accepts several TCP connections at once. Another client (a second server instance, a script) can change settings underneath this server, and replies can interleave and time out. | Not detectable from the server. Mitigation: one controller per instrument, network segmentation. |
 | **Combined peak isn't tracked.** Limits are checked per parameter. Offset 3 V plus amplitude 5 Vpp in separate calls gives a 5.5 V peak that neither check sees on its own. Modulation depth over 100 % and amplitude sweeps can also exceed the carrier amplitude. | Deferred: needs state tracking or a read-back of the instrument settings. Backstop: set the generator's own `MAX_OUTPUT_AMP`. |
 | **Turning the output on needs no confirmation.** | Planned: human-in-the-loop confirmation (MCP elicitation) for physical actions. |
 | **No caller identity in stdio mode.** Whoever can start the process has full access; that is the stdio trust model. | Planned: HTTP transport with OAuth 2.1 (Keycloak as authorization server), per-tool scopes, policy-based authorization. |
