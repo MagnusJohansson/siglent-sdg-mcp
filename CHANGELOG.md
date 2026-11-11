@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.0.1
+
+Release-process fix. **2.0.0 was released on GitHub and GHCR, but never published to npm**: the publish workflow upgraded to `npm@latest`, and npm 12 no longer supports the Node 20 runtime the workflow used. 2.0.1 contains the same code as 2.0.0 and is the first 2.x version on npm. All 2.0.0 security fixes and breaking changes apply; see below.
+
+- The npm publish workflow runs on Node 26 (LTS) and pins npm to major version 12 instead of `@latest`.
+- The Docker image is based on `node:26-slim` (was `node:20-slim`; Node 20 is end-of-life).
+- CI tests on Node 20, 22, 24 and 26.
+- A test checks that the server version reported to MCP clients matches `package.json`.
+
 ## 2.0.0
 
 Security release. Tool arguments come from a language model and are now treated as untrusted input. See [docs/threat-model.md](docs/threat-model.md) for the full analysis.
