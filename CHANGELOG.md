@@ -28,5 +28,6 @@ Server-side output voltage limits were developed for this release but **removed 
 - `scpi_query` accepts absolute queries with a leading root colon (e.g. `:SENSe:COUNTer:FREQuency?`). Parameters after `?` are only accepted for `STL?` and `MMEMory:CATalog?`, in their documented forms. `WVDT?` (binary reply) is not accepted. `*` commands are only accepted as pure queries (`*IDN?`, `*OPC?`, `*ESR?`, `*STB?`, `*ESE?`, `*SRE?`, `*OPT?`).
 - `destructiveHint` on `reset` and `scpi_command`.
 - SCPI simulator and end-to-end security tests (`npm test`), plus a CI workflow. Tests also run before npm publish.
+- Publishing to npm and GHCR is triggered by publishing a GitHub Release, not by pushing a tag. The npm workflow checks that the release tag matches `package.json`, and pre-releases go to the npm `next` dist-tag.
 - Threat model: `docs/threat-model.md`.
 - Hardware check against a real SDG (`npm run hardware-check -- <ip>`), which verifies the security checks by reading the instrument state back. Its probes never request output ON.

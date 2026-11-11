@@ -413,6 +413,16 @@ To check against real hardware (never turns an output on, aborts if C1 output is
 npm run hardware-check -- 192.168.1.126
 ```
 
+### Releasing
+
+Publishing is triggered by **publishing a GitHub Release**, not by pushing a tag:
+
+1. Bump `version` in `package.json` and add a section to `CHANGELOG.md`, then merge to `main`.
+2. Create a release (draft first) with tag `vX.Y.Z` on `main`, using the changelog section as the release notes.
+3. Publish the release. This runs the npm publish (tests first, with provenance) and the GHCR image build.
+
+The npm workflow fails if the tag doesn't match the `package.json` version. A pre-release publishes to the npm `next` dist-tag, and doesn't move the Docker `latest` tag. A draft release publishes nothing.
+
 ### Docker (local build)
 
 Build the image locally:

@@ -1,9 +1,10 @@
 name: Publish to npm
 
+# Publishing a GitHub Release is the single trigger for publishing: the
+# release notes exist before anything ships, and a draft publishes nothing.
 on:
-  push:
-    tags:
-      - "v*"
+  release:
+    types: [published]
 
 jobs:
   publish:
@@ -15,6 +16,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Check release tag matches package.json version
+        run: |
+          expected="v$(node -p "require('./package.json').version")"
+          if [ "$GITHUB_REF_NAME" != "$expected" ]; then
+            echo "Release tag $GITHUB_REF_NAME does not match package.json version ($expected)."
+            exit 1
+          fi
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -34,5 +43,6 @@ jobs:
       - name: Test
         run: npm test
 
+      # Pre-releases go to the "next" dist-tag so they don't become "latest".
       - name: Publish
-        run: npm publish --provenance --access public
+        run: npm publish --provenance --access public ${{ github.event.release.prerelease && '--tag next' || '' }}
