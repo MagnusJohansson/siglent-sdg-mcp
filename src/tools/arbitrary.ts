@@ -48,9 +48,13 @@ export function registerArbitraryTools(server: McpServer): void {
         ),
       name: z
         .string()
+        .regex(
+          /^[A-Za-z0-9_\-./ ]{1,64}$/,
+          "Name may contain letters, digits, space, '_', '-', '.', '/' (max 64)"
+        )
         .optional()
         .describe(
-          'Name of the waveform (for user-defined waves, use quotes). Can also be a path like "Local/wave1.bin"'
+          'Name of the waveform for user-defined waves (without quotes). Can also be a path like "Local/wave1.bin"'
         ),
     },
     { readOnlyHint: false },

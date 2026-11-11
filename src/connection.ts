@@ -1,4 +1,10 @@
 import * as net from "node:net";
+import {
+  assertIsQuery,
+  assertWireSafe,
+  assertWithinLimits,
+  type OutputLimits,
+} from "./security/scpi-guard.js";
 
 const DEFAULT_PORT = 5025;
 const DEFAULT_TIMEOUT = 5000;
@@ -25,6 +31,16 @@ export class SiglentConnection {
   private headerParsed = false;
   private queryQueue: QueuedQuery[] = [];
   private queryRunning = false;
+  private outputLimits: OutputLimits = {};
+
+  /**
+   * Set output limits enforced on every command sent through this connection.
+   * The connection is the single choke point to the instrument, so checks here
+   * apply regardless of which tool built the command.
+   */
+  setOutputLimits(limits: OutputLimits): void {
+    this.outputLimits = { ...limits };
+  }
 
   async connect(host: string, port: number = DEFAULT_PORT): Promise<string> {
     if (this.socket) {
@@ -111,6 +127,8 @@ export class SiglentConnection {
   }
 
   async sendCommand(cmd: string): Promise<void> {
+    assertWireSafe(cmd);
+    assertWithinLimits(cmd, this.outputLimits);
     this.ensureConnected();
     return new Promise((resolve, reject) => {
       this.socket!.write(cmd + "\n", (err) => {
@@ -121,6 +139,9 @@ export class SiglentConnection {
   }
 
   async query(cmd: string, timeout: number = DEFAULT_TIMEOUT): Promise<string> {
+    // A query must be structurally a query; otherwise "C1:OUTP ON" sent via a
+    // read-only tool would change state and simply time out waiting for a reply.
+    assertIsQuery(cmd);
     this.ensureConnected();
     const buf = await this.enqueueQuery(cmd, false, timeout);
     return buf.toString("utf-8").trim();
@@ -130,6 +151,7 @@ export class SiglentConnection {
     cmd: string,
     timeout: number = BINARY_TIMEOUT
   ): Promise<Buffer> {
+    assertWireSafe(cmd);
     this.ensureConnected();
     return this.enqueueQuery(cmd, true, timeout);
   }

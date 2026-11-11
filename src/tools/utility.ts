@@ -7,7 +7,7 @@ export function registerUtilityTools(server: McpServer): void {
     "reset",
     "Reset the waveform generator to factory default settings (*RST).",
     {},
-    { readOnlyHint: false },
+    { readOnlyHint: false, destructiveHint: true },
     async () => {
       try {
         await connection.sendCommand("*RST");

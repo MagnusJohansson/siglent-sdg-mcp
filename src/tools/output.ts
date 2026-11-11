@@ -46,6 +46,7 @@ export function registerOutputTools(server: McpServer): void {
         .describe("Output state: ON or OFF"),
       load: z
         .string()
+        .regex(/^(HZ|\d+(\.\d+)?)$/i, "Load must be 'HZ' or a number of ohms")
         .optional()
         .describe(
           "Load impedance in ohms (50-100000) or 'HZ' for high impedance"

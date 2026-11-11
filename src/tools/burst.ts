@@ -70,6 +70,7 @@ export function registerBurstTools(server: McpServer): void {
         .describe("Trigger edge (when EXT or MAN)"),
       cycles: z
         .string()
+        .regex(/^(INF|\d{1,7})$/i, "Cycles must be an integer or 'INF'")
         .optional()
         .describe("Number of burst cycles (integer, or 'INF' for infinite)"),
       delay: z
