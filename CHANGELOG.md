@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.2
+
+Release-process fix. **2.0.1 was released on GitHub and GHCR, but never published to npm**: npm rejected the provenance-signed upload because `repository.url` in `package.json` used a different letter case (`magnusjohansson`) than the repository (`MagnusJohansson`). 2.0.2 contains the same code as 2.0.0 and 2.0.1 and is the first 2.x version on npm. All 2.0.0 security fixes and breaking changes apply; see below.
+
+- `repository.url` now matches the repository exactly.
+- The npm publish workflow checks `repository.url` before building, so a mismatch fails at the start of the run.
+
 ## 2.0.1
 
 Release-process fix. **2.0.0 was released on GitHub and GHCR, but never published to npm**: the publish workflow upgraded to `npm@latest`, and npm 12 no longer supports the Node 20 runtime the workflow used. 2.0.1 contains the same code as 2.0.0 and is the first 2.x version on npm. All 2.0.0 security fixes and breaking changes apply; see below.
