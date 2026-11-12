@@ -25,6 +25,17 @@ jobs:
             exit 1
           fi
 
+      # npm rejects a provenance-signed publish unless repository.url matches
+      # this repository exactly, including case (this broke the 2.0.1 publish).
+      - name: Check repository.url matches this repository
+        run: |
+          expected="git+https://github.com/${GITHUB_REPOSITORY}.git"
+          actual="$(node -p "require('./package.json').repository.url")"
+          if [ "$actual" != "$expected" ]; then
+            echo "package.json repository.url is $actual, expected $expected."
+            exit 1
+          fi
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:

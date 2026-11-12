@@ -1,6 +1,6 @@
 {
   "name": "siglent-sdg-mcp",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "MCP server for Siglent SDG waveform generator control via SCPI over TCP sockets",
   "type": "module",
   "main": "build/index.js",
@@ -33,7 +33,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/magnusjohansson/siglent-sdg-mcp.git"
+    "url": "git+https://github.com/MagnusJohansson/siglent-sdg-mcp.git"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
