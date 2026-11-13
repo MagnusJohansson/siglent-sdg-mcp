@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0.3
+
+Dependency security update. No changes to the server's own code. `npm audit` goes from 20 vulnerable packages (3 critical, 12 high) to none.
+
+- `@modelcontextprotocol/sdk` 1.27.1 → 1.32.2. Fixes advisories in the SDK's OAuth client and HTTP session handling, and, through its dependencies, in the HTTP stack (express, body-parser, hono, proxy-addr, path-to-regexp, qs and others). This server uses the stdio transport, which doesn't load that code, but the Docker image shipped those versions.
+- `zod` 3.25 → 4.6. zod 3 is affected by a memory-exhaustion advisory with no 3.x fix. Validation behaviour is unchanged: the same formats are enforced and unknown arguments are still dropped. The tool schemas sent to clients no longer include `additionalProperties: false`.
+- `vitest` 3.2 → 4.1.12 (development only).
+
 ## 2.0.2
 
 Release-process fix. **2.0.1 was released on GitHub and GHCR, but never published to npm**: npm rejected the provenance-signed upload because `repository.url` in `package.json` used a different letter case (`magnusjohansson`) than the repository (`MagnusJohansson`). 2.0.2 contains the same code as 2.0.0 and 2.0.1 and is the first 2.x version on npm. All 2.0.0 security fixes and breaking changes apply; see below.
