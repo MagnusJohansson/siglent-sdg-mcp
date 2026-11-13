@@ -1,5 +1,11 @@
 # siglent-sdg-mcp
 
+[![CI](https://github.com/MagnusJohansson/siglent-sdg-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/MagnusJohansson/siglent-sdg-mcp/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/MagnusJohansson/siglent-sdg-mcp/actions/workflows/codeql.yml/badge.svg)](https://github.com/MagnusJohansson/siglent-sdg-mcp/actions/workflows/codeql.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/MagnusJohansson/siglent-sdg-mcp/badge)](https://scorecard.dev/viewer/?uri=github.com/MagnusJohansson/siglent-sdg-mcp)
+[![npm](https://img.shields.io/npm/v/siglent-sdg-mcp)](https://www.npmjs.com/package/siglent-sdg-mcp)
+[![License: MIT](https://img.shields.io/github/license/MagnusJohansson/siglent-sdg-mcp)](LICENSE)
+
 A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that lets AI assistants control Siglent SDG waveform generators over your local network. Connect Claude to your bench and generate, modulate, and configure signals through natural language.
 
 ## Overview
