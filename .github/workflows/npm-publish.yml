@@ -6,6 +6,10 @@ on:
   release:
     types: [published]
 
+# Read-only by default; the job adds only what publishing needs.
+permissions:
+  contents: read
+
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -15,8 +19,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Check release tag matches package.json version
         run: |
           expected="v$(node -p "require('./package.json').version")"
@@ -37,15 +40,12 @@ jobs:
           fi
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
+          # Node 26 bundles npm 11.20, which supports trusted publishing (needs
+          # >= 11.5.1). No separate npm install: it would be an unpinned download.
           node-version: 26
           registry-url: https://registry.npmjs.org
-
-      # Pinned to a major version: "npm@latest" broke the 2.0.0 publish when
-      # npm 12 dropped support for the Node version this workflow ran on.
-      - name: Update npm
-        run: npm install -g npm@12
 
       - name: Install dependencies
         run: npm ci
