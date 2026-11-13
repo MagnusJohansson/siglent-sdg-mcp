@@ -11,6 +11,21 @@ updates:
     groups:
       npm-minor-and-patch:
         update-types: [minor, patch]
+    # Major versions held back on purpose. Ignore rules also apply to security
+    # updates, so a fix released only in a new major won't be proposed for
+    # these packages: Dependabot alerts still report it.
+    ignore:
+      # vitest 5 requires Node >= 22; CI still tests Node 20 (engines ">=20").
+      # Revisit when Node 20 support is dropped.
+      - dependency-name: vitest
+        update-types: [version-update:semver-major]
+      # @types/node should match the oldest supported Node, so the compiler
+      # rejects APIs that Node 20 doesn't have.
+      - dependency-name: "@types/node"
+        update-types: [version-update:semver-major]
+      # TypeScript 7 (native compiler) fails the build; migrate separately.
+      - dependency-name: typescript
+        update-types: [version-update:semver-major]
 
   - package-ecosystem: github-actions
     directory: /
