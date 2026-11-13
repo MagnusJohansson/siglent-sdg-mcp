@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.0.4
+
+### Fixed
+
+- `scpi_query` no longer accepts `*ESR?`. Reading the Event Status Register clears it, so a tool marked read-only could discard status events. The other common queries (`*IDN?`, `*OPC?`, `*STB?`, `*ESE?`, `*SRE?`, `*OPT?`) don't change state and are still allowed.
+
+### Release process
+
+- One `Release` workflow replaces the separate npm and Docker workflows. It runs verify, npm and docker jobs in order: nothing is published unless the release tag matches `package.json` and `SERVER_VERSION`, `repository.url` matches the repository, the pre-release flag matches the version, the tagged commit is on `main`, and the tests pass. The Docker image is pushed only after npm succeeds (for v2.0.0 and v2.0.1, GHCR images were pushed although the npm publish failed). Dependency install scripts are disabled in the release jobs and the Docker build.
+
 ## 2.0.3
 
 Dependency security update. No changes to the server's own code. `npm audit` goes from 20 vulnerable packages (3 critical, 12 high) to none.

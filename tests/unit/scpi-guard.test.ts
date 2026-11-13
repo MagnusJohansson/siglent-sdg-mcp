@@ -61,6 +61,7 @@ describe("assertIsQuery", () => {
     ["reset in query form", "*RST?"],
     ["self-test in query form", "*TST?"],
     ["clear status in query form", "*CLS?"],
+    ["event status register read (clears the register)", "*ESR?"],
     ["WVDT? (binary reply; parameters overlap the WVDT setter)", "WVDT? USER,wave1"],
     ["setter-shaped WVDT? parameters", "WVDT? WVNM,x,WAVEDATA,AAAA"],
     ["undocumented STL? parameters", "STL? WVNM,x"],
