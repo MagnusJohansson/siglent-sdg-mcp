@@ -115,7 +115,10 @@ export class SdgSimulator {
     const copy = /^PACP (C[12]),(C[12])$/.exec(upper);
     if (copy) {
       const [dest, src] = [copy[1] as "C1" | "C2", copy[2] as "C1" | "C2"];
-      this.channels[dest] = { ...this.channels[src], output: this.channels[dest].output };
+      // Copy into the existing object rather than assigning this.channels[dest]:
+      // no property name taken from the wire is ever written.
+      const target = this.channels[dest];
+      Object.assign(target, { ...this.channels[src], output: target.output });
       return undefined;
     }
 

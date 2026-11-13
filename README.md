@@ -423,11 +423,11 @@ npm run hardware-check -- 192.168.1.126
 
 Publishing is triggered by **publishing a GitHub Release**, not by pushing a tag:
 
-1. Bump `version` in `package.json` and add a section to `CHANGELOG.md`, then merge to `main`.
-2. Create a release (draft first) with tag `vX.Y.Z` on `main`, using the changelog section as the release notes.
-3. Publish the release. This runs the npm publish (tests first, with provenance) and the GHCR image build.
+1. Bump `version` in `package.json` and `SERVER_VERSION` in `src/server.ts`, and add a `CHANGELOG.md` section. Merge to `main`.
+2. Create a release (draft first) with tag `vX.Y.Z` on `main`, using the changelog section as the release notes. Tick "pre-release" exactly when the version has a suffix such as `-rc.1`.
+3. Publish the release. The `Release` workflow runs three jobs in order: **verify**, then **npm**, then **docker**.
 
-The npm workflow fails if the tag doesn't match the `package.json` version. A pre-release publishes to the npm `next` dist-tag, and doesn't move the Docker `latest` tag. A draft release publishes nothing.
+The verify job fails, and nothing is published, if the tag doesn't match the `package.json` version, `SERVER_VERSION` differs from it, `repository.url` doesn't match the repository exactly, the pre-release checkbox doesn't match the version, the tagged commit isn't on `main`, or the build or tests fail. The Docker image is only pushed after the npm publish succeeds. A pre-release publishes to the npm `next` dist-tag and doesn't move the Docker `latest` tag. A draft release publishes nothing.
 
 ### Docker (local build)
 
