@@ -19,8 +19,9 @@ updates:
       # Revisit when Node 20 support is dropped.
       - dependency-name: vitest
         update-types: [version-update:semver-major]
-      # @types/node should match the oldest supported Node, so the compiler
-      # rejects APIs that Node 20 doesn't have.
+      # Keeps @types/node from drifting further ahead of the oldest supported
+      # runtime. It is on 22 while engines is ">=20", so it doesn't catch
+      # Node 22-only APIs; aligning it with Node 20 is a separate change.
       - dependency-name: "@types/node"
         update-types: [version-update:semver-major]
       # TypeScript 7 (native compiler) fails the build; migrate separately.
