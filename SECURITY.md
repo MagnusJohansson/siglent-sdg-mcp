@@ -33,7 +33,7 @@ The server treats every tool argument as untrusted, because it comes from a lang
 ## Known limitations
 
 These are documented in the [threat model](docs/threat-model.md) and are not vulnerabilities in themselves:
-- **The server does not limit output voltage.** Use the generator's own `MAX_OUTPUT_AMP` setting. Server-side limits are tracked in [#4](https://github.com/MagnusJohansson/siglent-sdg-mcp/issues/4).
+- **The server does not limit output voltage.** The generator's own `MAX_OUTPUT_AMP` setting is the backstop, but **only while raw SCPI is off**: with `SIGLENT_ALLOW_RAW_SCPI=true`, the model can raise the limit itself. Whether `reset` (`*RST`) restores the default limit isn't documented; check it on your model before relying on it. Server-side limits are tracked in [#4](https://github.com/MagnusJohansson/siglent-sdg-mcp/issues/4).
 - Switching an output on needs no extra confirmation.
 - The instrument's SCPI port (TCP 5025) has no authentication. Anyone who can reach it controls the instrument directly, without this server.
 - In stdio mode there is no caller identity: whoever can start the process has full access.
