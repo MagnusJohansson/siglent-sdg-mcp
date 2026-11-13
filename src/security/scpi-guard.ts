@@ -84,9 +84,11 @@ const QUERY_PARAMETER_RULES: Array<{ name: string; header: RegExp; params: RegEx
 
 /**
  * IEEE 488.2 common commands that are pure queries. Others that accept a '?'
- * form (*RST?, *TST?, *CLS?) are actions, or would run a self-test.
+ * form (*RST?, *TST?, *CLS?) are actions, or would run a self-test. *ESR? is
+ * excluded too: reading the Event Status Register clears it, which a tool
+ * marked read-only must not do.
  */
-const COMMON_QUERIES = new Set(["IDN", "OPC", "ESR", "STB", "ESE", "SRE", "OPT"]);
+const COMMON_QUERIES = new Set(["IDN", "OPC", "STB", "ESE", "SRE", "OPT"]);
 
 export function assertIsQuery(cmd: string): void {
   assertWireSafe(cmd);
