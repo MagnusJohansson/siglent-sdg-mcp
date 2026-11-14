@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
 import { assertIsQuery, assertWireSafe, ScpiPolicyError } from "../../src/security/scpi-guard.js";
 
 describe("assertWireSafe", () => {
@@ -70,5 +71,81 @@ describe("assertIsQuery", () => {
     ["parameters on a query that takes none", 'C1:BSWV? "Local"'],
   ])("rejects %s", (_label, cmd) => {
     expect(() => assertIsQuery(cmd)).toThrow(ScpiPolicyError);
+  });
+});
+
+describe("assertIsQuery: action commands in query form", () => {
+  it.each([
+    // Long, short, in-between and lower-case spellings, with and without a channel.
+    "C1:SWEep:MTRigger?",
+    "C2:SWE:MTR?",
+    "C1:TRIGger?",
+    "C1:TRIG?",
+    ":C2:TRIG:SEQ:IMM?",
+    "C1:TRIGger:IMMediate?",
+    "C1:TRIGger:SEQuence?",
+    "TRIG?",
+    "C1:SEQuence:DEFAult?",
+    "C1:SEQ:NEW?",
+    "C1:SEQ:REC?",
+    "C1:SEQuence:SAVe?",
+    "C1:SEQuence:SEGMent3:DELEte?",
+    "C1:SEQ:SEGM12:INSE?",
+    "C1:FHOP:CFLIst?",
+    "C1:FHOP:CFLIS?",
+    "c1:fhop:cflist?",
+    "C1:FHOP:COLI?",
+    "C1:FHOP:CALIst?",
+    "C1:FHOP:DALIst?",
+    "C2:FHOP:SFLI?",
+    ":SENSe:COUNTer:CLEar?",
+    "SENS:COUNT:CLE?",
+    "PACP?",
+    "PARACOPY?",
+    "VKEY?",
+    "MMEMory:DELete?",
+    "MMEM:MDIR?",
+    "MMEM:TRAN?",
+    "MMEM:SAVE:XML?",
+    "MMEMory:LOAD:XML?",
+  ])("rejects %s", (cmd) => {
+    expect(() => assertIsQuery(cmd)).toThrow(/action command/);
+  });
+
+  it.each([
+    "C1:TRIGger:SOURce?",
+    "C1:TRIG:SEQ:SOUR?",
+    "C1:TRIGger:TIMer?",
+    "C1:TRIG:SLOP?",
+    "IQ:TRIGger:SOURce?",
+    "C1:SEQuence:SCALe?",
+    "C1:SEQuence:SEGMent3:WAVeform?",
+    "C1:FHOP:STATe?",
+    "C1:SWEep:FMARker?",
+    // Documented with a response format, so a query (see docs/threat-model.md).
+    "EQPHASE?",
+  ])("accepts the neighbouring query %s", (cmd) => {
+    expect(() => assertIsQuery(cmd)).not.toThrow();
+  });
+
+  it("blocks no query documented in the programming guide", () => {
+    const guide = readFileSync(new URL("../../docs/programming-guide.md", import.meta.url), "utf8");
+    const queries = [...guide.matchAll(/^[:*]?[A-Za-z][A-Za-z0-9_<>:[\] ]*\?/gm)].map((m) =>
+      m[0]
+        .replace(/<channel>/g, "C1")
+        .replace(/<x>/g, "1")
+        .replace(/\[[^\]]*\]/g, "")
+        .replace(/\s+/g, "")
+    );
+    expect(queries.length).toBeGreaterThan(200);
+    const blocked = queries.filter((q) => {
+      try {
+        assertIsQuery(q);
+        return false;
+      } catch (err) {
+        return /action command/.test(String(err));
+      }
+    });
+    expect(blocked).toEqual([]);
   });
 });

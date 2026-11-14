@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.5
+
+### Fixed
+
+- `scpi_query` no longer accepts action commands written as queries. The programming guide documents some commands with no query form: triggers (`C1:TRIGger`, `C1:SWEep:MTRigger`), sequence and frequency-hop table edits (`C1:SEQuence:DEFAult`, `C1:SEQuence:SEGMent<x>:DELEte`, `C1:FHOP:CFLIst`, ...), `:SENSe:COUNTer:CLEar`, `PACP`, `VKEY` and the `MMEMory` file operations. With a `?` appended they passed the query-shape check, and whether the firmware ignores the `?` or runs the action isn't documented. They are now rejected in long, short and lower-case spellings, with or without a channel prefix. A unit test checks that none of the queries documented in the guide is rejected by this list.
+- The hardware check probes `C1:TRIGger?` and `*ESR?` through `scpi_query`.
+
 ## 2.0.4
 
 ### Fixed

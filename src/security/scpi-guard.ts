@@ -90,6 +90,71 @@ const QUERY_PARAMETER_RULES: Array<{ name: string; header: RegExp; params: RegEx
  */
 const COMMON_QUERIES = new Set(["IDN", "OPC", "STB", "ESE", "SRE", "OPT"]);
 
+/**
+ * A SCPI mnemonic as a regex source: the short form (the upper-case part)
+ * followed by any leading part of the rest, so "MTRigger" matches MTR, MTRI,
+ * ... MTRIGGER. SCPI only defines the short and long forms; accepting the
+ * lengths in between is deliberate, because this list blocks, and blocking a
+ * spelling the firmware might also accept is the safe direction.
+ */
+function mnemonic(m: string): string {
+  const short = /^[A-Z0-9]+/.exec(m)?.[0] ?? "";
+  const tail = m.slice(short.length).toUpperCase();
+  return short + [...tail].reduceRight((rest, ch) => `(?:${ch}${rest})?`, "");
+}
+
+/**
+ * A header pattern written in the programming guide's notation:
+ * "<ch>:" an optional channel prefix (C1:, C2:), "A|B" alternatives,
+ * "[:NODE]" an optional node, and a trailing "#" a node number (SEGMent3).
+ */
+function headerPattern(spec: string): RegExp {
+  let source = "";
+  let rest = spec;
+  if (rest.startsWith("<ch>:")) {
+    source = "(?:C\\d+:)?";
+    rest = rest.slice("<ch>:".length);
+  }
+  const nodes = rest.match(/\[:[^\]]+\]|[^:[\]]+/g) ?? [];
+  nodes.forEach((node, i) => {
+    const optional = node.startsWith("[");
+    let body = optional ? node.slice(2, -1) : node;
+    const numbered = body.endsWith("#");
+    if (numbered) body = body.slice(0, -1);
+    const pattern = `(?:${body.split("|").map(mnemonic).join("|")})${numbered ? "\\d*" : ""}`;
+    source += optional ? `(?::${pattern})?` : `${i === 0 ? "" : ":"}${pattern}`;
+  });
+  return new RegExp(`^${source}$`, "i");
+}
+
+/**
+ * Commands the SDG programming guide documents with no query form: actions
+ * (trigger, clear, delete, copy, save, load) and setters whose bare form
+ * creates or deletes something. The shape check can't tell "C1:TRIGger?" from
+ * a real query, and whether the firmware ignores the '?' or runs the action
+ * isn't documented, so a tool marked read-only must not send them.
+ *
+ * Matched against the whole header, so queries that share a node with an
+ * action (C1:TRIGger:SOURce?, C1:TRIGger:TIMer?) are unaffected. The channel
+ * prefix is optional: blocking the form without it too is the safe direction.
+ * Defence in depth on top of the shape check; undocumented headers remain a
+ * residual risk (see docs/threat-model.md).
+ */
+const ACTION_HEADERS = [
+  "<ch>:SWEep:MTRigger",
+  "<ch>:TRIGger[:SEQuence][:IMMediate]",
+  "<ch>:SEQuence:DEFAult|NEW|RECall|SAVe",
+  "<ch>:SEQuence:SEGMent#:DELEte|INSErt",
+  "<ch>:FHOP:AFLIst|DFLIst|CFLIst|MFLIst|LFLIst|SFLIst",
+  "<ch>:FHOP:AOLIst|DOLIst|COLIst|MOLIst|LOLIst|SOLIst",
+  "<ch>:FHOP:AALIst|DALIst|CALIst|LALIst|SALIst",
+  "SENSe:COUNTer:CLEar",
+  "PACP|PARACOPY",
+  "VKEY|VIRTUALKEY",
+  "MMEMory:DELete|RDIRectory|MDIRectory|COPY|MOVE|TRANsfer",
+  "MMEMory:SAVE|LOAD:XML",
+].map((spec) => ({ spec, header: headerPattern(spec) }));
+
 export function assertIsQuery(cmd: string): void {
   assertWireSafe(cmd);
   const m = QUERY_PATTERN.exec(cmd.trim());
@@ -107,6 +172,15 @@ export function assertIsQuery(cmd: string): void {
       `"*${name}?" is not allowed: only the common queries ` +
         `${[...COMMON_QUERIES].map((q) => `*${q}?`).join(", ")} are permitted.`
     );
+  }
+  if (prefix !== "*") {
+    const action = ACTION_HEADERS.find((a) => a.header.test(header));
+    if (action) {
+      throw new ScpiPolicyError(
+        `"${header}?" is not allowed: ${action.spec} is an action command with no documented ` +
+          "query form, and the instrument might run it."
+      );
+    }
   }
   if (params !== undefined && params.trim() !== "") {
     const rule = QUERY_PARAMETER_RULES.find((r) => r.header.test(header));
