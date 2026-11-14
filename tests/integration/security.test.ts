@@ -117,7 +117,8 @@ describe("default configuration", () => {
     });
 
     it.each(["C1:OUTP ON", "C1:OUTP?;C1:OUTP ON", "C1:OUTP?\nC1:OUTP ON", "*RST", "*RST?", "*ESR?", "C1:BSWV? AMP,10", "C1:OUTP? ON",
-      "C1:TRIGger?", "C1:SWEep:MTRigger?", "C1:FHOP:CFLIst?", ":SENSe:COUNTer:CLEar?", "MMEM:SAVE:XML?"])(
+      "C1:TRIGger?", "C1:SWEep:MTRigger?", "C1:FHOP:CFLIst?", ":SENSe:COUNTer:CLEar?", "MMEM:SAVE:XML?",
+      "EQPHASE?", "C1::TRIG?"])(
       "rejects %j and sends nothing",
       async (command) => {
         await expectRejected(ctx.client, "scpi_query", { command });

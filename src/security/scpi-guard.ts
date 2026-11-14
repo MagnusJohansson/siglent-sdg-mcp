@@ -48,13 +48,14 @@ export function assertWireSafe(cmd: string): void {
 
 /**
  * Query shape: an optional root colon or '*', a header, then '?' immediately
- * after it, optionally followed by parameters.
+ * after it, optionally followed by parameters. Every node of the header is
+ * non-empty: "C1::TRIG?" and "C1:TRIG:?" are not queries.
  *
  * This is a structural check (allowlist of shape), not a denylist of setter
  * keywords, so long-form headers or unusual setters cannot slip through:
  * anything without '?' directly after the header is not a query.
  */
-const QUERY_PATTERN = /^(\*|:)?([A-Za-z][A-Za-z0-9_:]*)\?(?: ([A-Za-z0-9_,.+\-"/ ]*))?$/;
+const QUERY_PATTERN = /^(\*|:)?([A-Za-z][A-Za-z0-9_]*(?::[A-Za-z][A-Za-z0-9_]*)*)\?(?: ([A-Za-z0-9_,.+\-"/ ]*))?$/;
 
 /**
  * Queries that legitimately take parameters after the '?', each with the
@@ -104,24 +105,21 @@ function mnemonic(m: string): string {
 }
 
 /**
- * A header pattern written in the programming guide's notation:
- * "<ch>:" an optional channel prefix (C1:, C2:), "A|B" alternatives,
- * "[:NODE]" an optional node, and a trailing "#" a node number (SEGMent3).
+ * A header pattern written in the programming guide's notation: "<ch>:" a
+ * channel prefix (C1:, C2:), "A|B" alternatives and "[:NODE]" an optional
+ * node. Blocking more spellings than the guide documents is the safe
+ * direction, so every pattern also matches a channel prefix where the guide
+ * has none ("C1:MMEM:DEL") and a numeric suffix on any node ("SENS1",
+ * "SEGMent3"), which SCPI parsers commonly accept.
  */
 function headerPattern(spec: string): RegExp {
-  let source = "";
-  let rest = spec;
-  if (rest.startsWith("<ch>:")) {
-    source = "(?:C\\d+:)?";
-    rest = rest.slice("<ch>:".length);
-  }
+  const rest = spec.startsWith("<ch>:") ? spec.slice("<ch>:".length) : spec;
+  let source = "(?:C\\d+:)?";
   const nodes = rest.match(/\[:[^\]]+\]|[^:[\]]+/g) ?? [];
   nodes.forEach((node, i) => {
     const optional = node.startsWith("[");
-    let body = optional ? node.slice(2, -1) : node;
-    const numbered = body.endsWith("#");
-    if (numbered) body = body.slice(0, -1);
-    const pattern = `(?:${body.split("|").map(mnemonic).join("|")})${numbered ? "\\d*" : ""}`;
+    const body = optional ? node.slice(2, -1) : node;
+    const pattern = `(?:${body.split("|").map(mnemonic).join("|")})\\d*`;
     source += optional ? `(?::${pattern})?` : `${i === 0 ? "" : ":"}${pattern}`;
   });
   return new RegExp(`^${source}$`, "i");
@@ -130,13 +128,14 @@ function headerPattern(spec: string): RegExp {
 /**
  * Commands the SDG programming guide documents with no query form: actions
  * (trigger, clear, delete, copy, save, load) and setters whose bare form
- * creates or deletes something. The shape check can't tell "C1:TRIGger?" from
+ * creates or deletes something, plus EQPHASE: the guide lists a response
+ * format for it, but documents it only as a command that aligns the channel
+ * phases, which steps the phase of a running output. The shape check can't tell "C1:TRIGger?" from
  * a real query, and whether the firmware ignores the '?' or runs the action
  * isn't documented, so a tool marked read-only must not send them.
  *
  * Matched against the whole header, so queries that share a node with an
- * action (C1:TRIGger:SOURce?, C1:TRIGger:TIMer?) are unaffected. The channel
- * prefix is optional: blocking the form without it too is the safe direction.
+ * action (C1:TRIGger:SOURce?, C1:TRIGger:TIMer?) are unaffected.
  * Defence in depth on top of the shape check; undocumented headers remain a
  * residual risk (see docs/threat-model.md).
  */
@@ -144,7 +143,7 @@ const ACTION_HEADERS = [
   "<ch>:SWEep:MTRigger",
   "<ch>:TRIGger[:SEQuence][:IMMediate]",
   "<ch>:SEQuence:DEFAult|NEW|RECall|SAVe",
-  "<ch>:SEQuence:SEGMent#:DELEte|INSErt",
+  "<ch>:SEQuence:SEGMent:DELEte|INSErt",
   "<ch>:FHOP:AFLIst|DFLIst|CFLIst|MFLIst|LFLIst|SFLIst",
   "<ch>:FHOP:AOLIst|DOLIst|COLIst|MOLIst|LOLIst|SOLIst",
   "<ch>:FHOP:AALIst|DALIst|CALIst|LALIst|SALIst",
@@ -153,6 +152,7 @@ const ACTION_HEADERS = [
   "VKEY|VIRTUALKEY",
   "MMEMory:DELete|RDIRectory|MDIRectory|COPY|MOVE|TRANsfer",
   "MMEMory:SAVE|LOAD:XML",
+  "EQPHASE",
 ].map((spec) => ({ spec, header: headerPattern(spec) }));
 
 export function assertIsQuery(cmd: string): void {

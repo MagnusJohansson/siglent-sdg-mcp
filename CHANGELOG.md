@@ -4,8 +4,10 @@
 
 ### Fixed
 
-- `scpi_query` no longer accepts action commands written as queries. The programming guide documents some commands with no query form: triggers (`C1:TRIGger`, `C1:SWEep:MTRigger`), sequence and frequency-hop table edits (`C1:SEQuence:DEFAult`, `C1:SEQuence:SEGMent<x>:DELEte`, `C1:FHOP:CFLIst`, ...), `:SENSe:COUNTer:CLEar`, `PACP`, `VKEY` and the `MMEMory` file operations. With a `?` appended they passed the query-shape check, and whether the firmware ignores the `?` or runs the action isn't documented. They are now rejected in long, short and lower-case spellings, with or without a channel prefix. A unit test checks that none of the queries documented in the guide is rejected by this list.
-- The hardware check probes `C1:TRIGger?` and `*ESR?` through `scpi_query`.
+- `scpi_query` no longer accepts action commands written as queries. The programming guide documents some commands with no query form: triggers (`C1:TRIGger`, `C1:SWEep:MTRigger`), sequence and frequency-hop table edits (`C1:SEQuence:DEFAult`, `C1:SEQuence:SEGMent<x>:DELEte`, `C1:FHOP:CFLIst`, ...), `:SENSe:COUNTer:CLEar`, `PACP`, `VKEY` and the `MMEMory` file operations. With a `?` appended they passed the query-shape check, and whether the firmware ignores the `?` or runs the action isn't documented. They are now rejected in long, short and lower-case spellings, with or without a channel prefix or a numeric suffix. A unit test checks that every query documented in the guide, in long and short form, is still accepted.
+- `scpi_query` no longer accepts `EQPHASE?`. The guide lists a response format for it, but documents `EQPHASE` only as a command that aligns the phases of both channels, which steps the phase of a running output. The `sync_phase` tool is unaffected.
+- `scpi_query` rejects headers with an empty node (`C1::TRIG?`, `C1:TRIG:?`).
+- The hardware check probes `C1:TRIGger?` and `*ESR?` through `scpi_query` (both are rejected by the server; the check doesn't test what the firmware would do with them).
 
 ## 2.0.4
 

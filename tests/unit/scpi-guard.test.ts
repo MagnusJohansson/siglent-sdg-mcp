@@ -69,6 +69,8 @@ describe("assertIsQuery", () => {
     ["STL? path without quotes", "STL? USER,net_storage"],
     ["MMEM catalog without a quoted path", "MMEM:CAT? Local"],
     ["parameters on a query that takes none", 'C1:BSWV? "Local"'],
+    ["empty header node", "C1::TRIG?"],
+    ["empty last node", "C1:TRIG:?"],
   ])("rejects %s", (_label, cmd) => {
     expect(() => assertIsQuery(cmd)).toThrow(ScpiPolicyError);
   });
@@ -108,6 +110,13 @@ describe("assertIsQuery: action commands in query form", () => {
     "MMEM:TRAN?",
     "MMEM:SAVE:XML?",
     "MMEMory:LOAD:XML?",
+    "EQPHASE?",
+    // Spellings outside the guide's notation that SCPI parsers commonly accept.
+    "C1:TRIGger1?",
+    "SENS1:COUNT:CLE?",
+    "C1:SENS:COUNT:CLE?",
+    "C1:MMEM:DEL?",
+    "C1:SEQ:SEGM:DELE?",
   ])("rejects %s", (cmd) => {
     expect(() => assertIsQuery(cmd)).toThrow(/action command/);
   });
@@ -122,30 +131,42 @@ describe("assertIsQuery: action commands in query form", () => {
     "C1:SEQuence:SEGMent3:WAVeform?",
     "C1:FHOP:STATe?",
     "C1:SWEep:FMARker?",
-    // Documented with a response format, so a query (see docs/threat-model.md).
-    "EQPHASE?",
   ])("accepts the neighbouring query %s", (cmd) => {
     expect(() => assertIsQuery(cmd)).not.toThrow();
   });
 
-  it("blocks no query documented in the programming guide", () => {
+  it("accepts every query documented in the programming guide, in long and short form", () => {
     const guide = readFileSync(new URL("../../docs/programming-guide.md", import.meta.url), "utf8");
-    const queries = [...guide.matchAll(/^[:*]?[A-Za-z][A-Za-z0-9_<>:[\] ]*\?/gm)].map((m) =>
-      m[0]
-        .replace(/<channel>/g, "C1")
-        .replace(/<x>/g, "1")
+    const documented = [
+      ...guide.matchAll(/QUERY SYNTAX\**\s*(?:\(\^\)\s*)?(?:Format\s*\d:\s*)?([^\n]*\?)/g),
+    ].map((m) =>
+      m[1]
+        .replace(/<\s*channel\s*>/gi, "C1")
+        .replace(/<\s*(x|index)\s*>/gi, "1")
         .replace(/\[[^\]]*\]/g, "")
         .replace(/\s+/g, "")
     );
-    expect(queries.length).toBeGreaterThan(200);
-    const blocked = queries.filter((q) => {
+    // The SCPI short form of each node: "SWEep" -> "SWE". Siglent's older
+    // mixed-case names (Comm_HeaDeR, BursTWaVe) aren't SCPI mnemonics.
+    const short = (q: string) =>
+      q
+        .slice(0, -1)
+        .split(":")
+        .map((n) => (/^[A-Z0-9]+[a-z]+\d*$/.test(n) ? n.replace(/[a-z]+/, "") : n))
+        .join(":") + "?";
+    // Typos in the guide's own syntax lines, not queries anyone can send.
+    const notQueries = new Set(["C1:BTWV(BursTWaVe)?", ":SENSe:COUNTer:CONFig:<parameter>?"]);
+
+    const queries = new Set(documented.filter((q) => !notQueries.has(q)).flatMap((q) => [q, short(q)]));
+    expect(queries.size).toBeGreaterThan(250);
+    const rejected = [...queries].filter((q) => {
       try {
         assertIsQuery(q);
         return false;
-      } catch (err) {
-        return /action command/.test(String(err));
+      } catch {
+        return true;
       }
     });
-    expect(blocked).toEqual([]);
+    expect(rejected).toEqual([]);
   });
 });
