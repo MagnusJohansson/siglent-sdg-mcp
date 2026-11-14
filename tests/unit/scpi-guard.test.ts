@@ -111,6 +111,8 @@ describe("assertIsQuery: action commands in query form", () => {
     "MMEM:SAVE:XML?",
     "MMEMory:LOAD:XML?",
     "EQPHASE?",
+    "OUT_BOTHCH?",
+    "C1:OUT_BOTHCH?",
     // Spellings outside the guide's notation that SCPI parsers commonly accept.
     "C1:TRIGger1?",
     "SENS1:COUNT:CLE?",
@@ -168,5 +170,80 @@ describe("assertIsQuery: action commands in query form", () => {
       }
     });
     expect(rejected).toEqual([]);
+  });
+
+  it("rejects every command the programming guide documents without a query form", () => {
+    const guide = readFileSync(new URL("../../docs/programming-guide.md", import.meta.url), "utf8");
+    // Command sections are numbered "3.x" or "3.x.y". A section can document
+    // more than one command (3.3 has <channel>:OUTPut and OUT_BOTHCH), each
+    // starting at its DESCRIPTION, so each block is classified on its own: it's
+    // command-only if neither of its syntax lines is a query.
+    const blocks = guide
+      .split(/\n(?=#{2,6} 3(?:\.\d+)+ )/)
+      .slice(1)
+      .flatMap((sec) => {
+        // The heading names the first command where its syntax line wraps ("MMEMory:DELete").
+        const heading = /^#{2,6} [\d.]+ (\S+)\s*$/.exec(sec.split("\n")[0])?.[1] ?? "";
+        const [head, ...rest] = sec.split(/(?=DESCRIPTION)/);
+        const texts = rest.length ? [head + rest[0], ...rest.slice(1)] : [head];
+        return texts.map((text, i) => ({ text, heading: i === 0 ? heading : "" }));
+      });
+    // The syntax line, with the guide's stray spaces after ':' removed
+    // ("<channel>: SWEep:TYPE?"). It can start on the next line; a code fence
+    // or heading picked up there is filtered out below.
+    const syntax = (text: string, kind: string) =>
+      [...text.matchAll(new RegExp(`${kind} SYNTAX\\**\\s*(?:\\(\\^\\)\\s*)?(?:Format\\s*\\d:\\s*)?([^\\n]*)`, "g"))].map(
+        (m) => m[1].replace(/:\s+/g, ":").trim()
+      );
+    const headers = blocks.flatMap(({ text, heading }) => {
+      const queries = syntax(text, "QUERY");
+      const commands = syntax(text, "COMMAND");
+      // A '?' on either line is a query: "COMMAND SYNTAX MMEMory:CATalog? <parameter>".
+      if ([...queries, ...commands].some((line) => line.includes("?"))) return [];
+      return [...commands, ...queries, heading].map((line) => line.split(/\s+/)[0]);
+    });
+    // The guide's notation to header spellings: optional nodes left out and
+    // spelled out, placeholders filled in, a parameter glued to the header
+    // ("MMEMory:MOVE<parameter>") cut off.
+    const fill = (h: string) =>
+      h
+        .replace(/<\s*channel\s*>/gi, "C1")
+        .replace(/<\s*(x|index)\s*>/gi, "1")
+        .replace(/<.*$/, "")
+        .replace(/\^/g, "");
+    const commands = new Set(
+      headers
+        .filter((h) => /^[*:]?[A-Za-z<][\w<>[\]:^]*$/.test(h))
+        .flatMap((h) => [fill(h.replace(/\[[^\]]*\]/g, "")), fill(h.replace(/[[\]]/g, ""))])
+        // An overview line ("3.23 :SENSe:COUNTer:TOTalizer:< parameter >"), not a header.
+        .filter((h) => !h.endsWith(":"))
+    );
+    // 38 command-only headers, *RST, and the trigger with its optional nodes
+    // spelled out. An exact count, so a parsing regression can't drop one.
+    expect(commands.size).toBe(40);
+    for (const h of ["OUT_BOTHCH", "VirtualKEY", "MMEMory:TRANsfer", ":SENSe:COUNTer:CLEar", "EQPHASE"]) {
+      expect(commands).toContain(h);
+    }
+
+    // Long form, the SCPI short form ("SWEep" -> "SWE") and lower case. The
+    // guide writes two names in Siglent's older mixed-case notation
+    // (ParaCoPy, VirtualKEY); their short forms PACP and VKEY are explicit
+    // cases above.
+    const short = (h: string) =>
+      h
+        .split(":")
+        .map((n) => (/^[A-Z0-9]+[a-z]+\d*$/.test(n) ? n.replace(/[a-z]+/, "") : n))
+        .join(":");
+    const leaks = [...commands]
+      .flatMap((h) => [`${h}?`, `${short(h)}?`, `${h.toLowerCase()}?`])
+      .filter((q) => {
+        try {
+          assertIsQuery(q);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+    expect(leaks).toEqual([]);
   });
 });
