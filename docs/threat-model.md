@@ -97,4 +97,4 @@ A third review of the withdrawal commit found no remaining way to change state t
 
 Limitation: the simulator replies instantly and in order, and doesn't model load, coupling or slow replies. Races and timing problems can't show up in this suite. That's one reason the limits were withdrawn rather than patched again.
 
-`scripts/hardware-check.mjs` repeats the security checks against a real SDG1032X and confirms each one by reading the instrument state back (15 of 15 pass). Its injection probes use a harmless frequency change as the payload, never an output-ON request.
+`scripts/hardware-check.mjs` repeats the security checks against a real SDG1032X and confirms each one by reading the instrument state back (17 of 17 pass). Its injection probes use a harmless frequency change as the payload, never an output-ON request.
