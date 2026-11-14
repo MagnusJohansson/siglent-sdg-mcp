@@ -145,6 +145,8 @@ async function main() {
     ["F1 setter via scpi_query", "scpi_query", { command: payload }],
     ["F1 compound query hides setter", "scpi_query", { command: `C1:BSWV?;${payload}` }],
     ["F1 setter parameters after query header", "scpi_query", { command: "C1:BSWV? FRQ,1234" }],
+    ["F1 action command in query form (C1:TRIGger?)", "scpi_query", { command: "C1:TRIGger?" }],
+    ["F1 read-and-clear status query (*ESR?)", "scpi_query", { command: "*ESR?" }],
     ["F2 newline injection in load", "configure_output", { channel: "C1", load: `50\n${payload}` }],
     ["F2 compound injection in load", "configure_output", { channel: "C1", load: `50;${payload}` }],
     ["F2 newline injection in cycles", "configure_burst", { channel: "C1", cycles: `1\n${payload}` }],

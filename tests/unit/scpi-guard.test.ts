@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
 import { assertIsQuery, assertWireSafe, ScpiPolicyError } from "../../src/security/scpi-guard.js";
 
 describe("assertWireSafe", () => {
@@ -68,7 +69,104 @@ describe("assertIsQuery", () => {
     ["STL? path without quotes", "STL? USER,net_storage"],
     ["MMEM catalog without a quoted path", "MMEM:CAT? Local"],
     ["parameters on a query that takes none", 'C1:BSWV? "Local"'],
+    ["empty header node", "C1::TRIG?"],
+    ["empty last node", "C1:TRIG:?"],
   ])("rejects %s", (_label, cmd) => {
     expect(() => assertIsQuery(cmd)).toThrow(ScpiPolicyError);
+  });
+});
+
+describe("assertIsQuery: action commands in query form", () => {
+  it.each([
+    // Long, short, in-between and lower-case spellings, with and without a channel.
+    "C1:SWEep:MTRigger?",
+    "C2:SWE:MTR?",
+    "C1:TRIGger?",
+    "C1:TRIG?",
+    ":C2:TRIG:SEQ:IMM?",
+    "C1:TRIGger:IMMediate?",
+    "C1:TRIGger:SEQuence?",
+    "TRIG?",
+    "C1:SEQuence:DEFAult?",
+    "C1:SEQ:NEW?",
+    "C1:SEQ:REC?",
+    "C1:SEQuence:SAVe?",
+    "C1:SEQuence:SEGMent3:DELEte?",
+    "C1:SEQ:SEGM12:INSE?",
+    "C1:FHOP:CFLIst?",
+    "C1:FHOP:CFLIS?",
+    "c1:fhop:cflist?",
+    "C1:FHOP:COLI?",
+    "C1:FHOP:CALIst?",
+    "C1:FHOP:DALIst?",
+    "C2:FHOP:SFLI?",
+    ":SENSe:COUNTer:CLEar?",
+    "SENS:COUNT:CLE?",
+    "PACP?",
+    "PARACOPY?",
+    "VKEY?",
+    "MMEMory:DELete?",
+    "MMEM:MDIR?",
+    "MMEM:TRAN?",
+    "MMEM:SAVE:XML?",
+    "MMEMory:LOAD:XML?",
+    "EQPHASE?",
+    // Spellings outside the guide's notation that SCPI parsers commonly accept.
+    "C1:TRIGger1?",
+    "SENS1:COUNT:CLE?",
+    "C1:SENS:COUNT:CLE?",
+    "C1:MMEM:DEL?",
+    "C1:SEQ:SEGM:DELE?",
+  ])("rejects %s", (cmd) => {
+    expect(() => assertIsQuery(cmd)).toThrow(/action command/);
+  });
+
+  it.each([
+    "C1:TRIGger:SOURce?",
+    "C1:TRIG:SEQ:SOUR?",
+    "C1:TRIGger:TIMer?",
+    "C1:TRIG:SLOP?",
+    "IQ:TRIGger:SOURce?",
+    "C1:SEQuence:SCALe?",
+    "C1:SEQuence:SEGMent3:WAVeform?",
+    "C1:FHOP:STATe?",
+    "C1:SWEep:FMARker?",
+  ])("accepts the neighbouring query %s", (cmd) => {
+    expect(() => assertIsQuery(cmd)).not.toThrow();
+  });
+
+  it("accepts every query documented in the programming guide, in long and short form", () => {
+    const guide = readFileSync(new URL("../../docs/programming-guide.md", import.meta.url), "utf8");
+    const documented = [
+      ...guide.matchAll(/QUERY SYNTAX\**\s*(?:\(\^\)\s*)?(?:Format\s*\d:\s*)?([^\n]*\?)/g),
+    ].map((m) =>
+      m[1]
+        .replace(/<\s*channel\s*>/gi, "C1")
+        .replace(/<\s*(x|index)\s*>/gi, "1")
+        .replace(/\[[^\]]*\]/g, "")
+        .replace(/\s+/g, "")
+    );
+    // The SCPI short form of each node: "SWEep" -> "SWE". Siglent's older
+    // mixed-case names (Comm_HeaDeR, BursTWaVe) aren't SCPI mnemonics.
+    const short = (q: string) =>
+      q
+        .slice(0, -1)
+        .split(":")
+        .map((n) => (/^[A-Z0-9]+[a-z]+\d*$/.test(n) ? n.replace(/[a-z]+/, "") : n))
+        .join(":") + "?";
+    // Typos in the guide's own syntax lines, not queries anyone can send.
+    const notQueries = new Set(["C1:BTWV(BursTWaVe)?", ":SENSe:COUNTer:CONFig:<parameter>?"]);
+
+    const queries = new Set(documented.filter((q) => !notQueries.has(q)).flatMap((q) => [q, short(q)]));
+    expect(queries.size).toBeGreaterThan(250);
+    const rejected = [...queries].filter((q) => {
+      try {
+        assertIsQuery(q);
+        return false;
+      } catch {
+        return true;
+      }
+    });
+    expect(rejected).toEqual([]);
   });
 });

@@ -1,6 +1,6 @@
 {
   "name": "siglent-sdg-mcp",
-  "version": "2.0.4",
+  "version": "2.0.5",
   "description": "MCP server for Siglent SDG waveform generator control via SCPI over TCP sockets",
   "type": "module",
   "main": "build/index.js",
