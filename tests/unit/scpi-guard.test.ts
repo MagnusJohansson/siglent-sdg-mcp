@@ -169,4 +169,60 @@ describe("assertIsQuery: action commands in query form", () => {
     });
     expect(rejected).toEqual([]);
   });
+
+  it("rejects every command the programming guide documents without a query form", () => {
+    const guide = readFileSync(new URL("../../docs/programming-guide.md", import.meta.url), "utf8");
+    // Command sections are numbered "3.x" or "3.x.y"; a section is command-only
+    // if none of its syntax lines is a query.
+    const sections = guide.split(/\n(?=#{2,6} 3(?:\.\d+)+ )/).slice(1);
+    // The syntax line, with the guide's stray spaces after ':' removed
+    // ("<channel>: SWEep:TYPE?"). It can start on the next line; a code fence
+    // or heading picked up there is filtered out below.
+    const syntax = (sec: string, kind: string) =>
+      [...sec.matchAll(new RegExp(`${kind} SYNTAX\\**\\s*(?:\\(\\^\\)\\s*)?(?:Format\\s*\\d:\\s*)?([^\\n]*)`, "g"))].map(
+        (m) => m[1].replace(/:\s+/g, ":").trim()
+      );
+    const headers = sections.flatMap((sec) => {
+      const queries = syntax(sec, "QUERY");
+      const commands = syntax(sec, "COMMAND");
+      // A '?' on either line is a query: "COMMAND SYNTAX MMEMory:CATalog? <parameter>".
+      if ([...queries, ...commands].some((line) => line.includes("?"))) return [];
+      // The heading names the header where the syntax line wraps ("MMEMory:DELete").
+      const heading = /^#{2,6} [\d.]+ (\S+)\s*$/.exec(sec.split("\n")[0])?.[1] ?? "";
+      return [...commands, ...queries, heading].map((line) => line.split(/\s+/)[0]);
+    });
+    // The guide's notation to header spellings: optional nodes left out and
+    // spelled out, placeholders filled in, a parameter glued to the header
+    // ("MMEMory:MOVE<parameter>") cut off.
+    const fill = (h: string) =>
+      h
+        .replace(/<\s*channel\s*>/gi, "C1")
+        .replace(/<\s*(x|index)\s*>/gi, "1")
+        .replace(/<[^>]*>.*$/, "")
+        .replace(/\^/g, "");
+    const commands = new Set(
+      headers
+        .filter((h) => /^[*:]?[A-Za-z<][\w<>[\]:^]*$/.test(h))
+        .flatMap((h) => [fill(h.replace(/\[[^\]]*\]/g, "")), fill(h.replace(/[[\]]/g, ""))])
+    );
+    expect(commands.size).toBeGreaterThan(35);
+
+    // Long form, the SCPI short form ("SWEep" -> "SWE") and lower case.
+    const short = (h: string) =>
+      h
+        .split(":")
+        .map((n) => (/^[A-Z0-9]+[a-z]+\d*$/.test(n) ? n.replace(/[a-z]+/, "") : n))
+        .join(":");
+    const leaks = [...commands]
+      .flatMap((h) => [`${h}?`, `${short(h)}?`, `${h.toLowerCase()}?`])
+      .filter((q) => {
+        try {
+          assertIsQuery(q);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+    expect(leaks).toEqual([]);
+  });
 });

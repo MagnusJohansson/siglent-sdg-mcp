@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Tests
+
+- A unit test reads the programming guide's command-only sections and checks that each command is rejected by `scpi_query` in long, short and lower-case form. Until now the guide-driven test only checked the other direction, that documented queries are still accepted. Deleting any one spelling from the action list now fails a test.
+- The 2.0.5 entry says every query documented in the guide is still accepted; precisely, every documented query header without parameters. Parameters after `?` remain limited to `STL?` and `MMEMory:CATalog?` (so `WVDT? M50` is refused, as before).
+
 ## 2.0.5
 
 ### Fixed
