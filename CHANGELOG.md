@@ -1,10 +1,15 @@
 # Changelog
 
-## Unreleased
+## 2.0.6
+
+### Fixed
+
+- `scpi_query` accepted `OUT_BOTHCH?`. The programming guide documents `OUT_BOTHCH` (switch both outputs on or off at the same time) without a query form, but it's listed inside the `<channel>:OUTPut` section rather than under its own heading, and 2.0.5 missed it. Whether the firmware would run it with a `?` appended isn't documented; without an `ON`/`OFF` value it's unclear what it would do. It's now rejected like the other action commands.
 
 ### Tests
 
-- A unit test reads the programming guide's command-only sections and checks that each command is rejected by `scpi_query` in long, short and lower-case form. Until now the guide-driven test only checked the other direction, that documented queries are still accepted. Deleting any one spelling from the action list now fails a test.
+- A unit test reads the programming guide and checks that every command it documents without a query form is rejected by `scpi_query` in long, short and lower-case form. Each command in a section is classified on its own, which is how it found `OUT_BOTHCH`. It asserts the exact number of commands found, so a parsing regression can't silently drop one. Until now the guide-driven test only checked the other direction, that documented queries are still accepted. Deleting any one spelling from the action list now fails a test. The short forms `PACP` and `VKEY` are explicit cases: the guide writes those two names as `ParaCoPy` and `VirtualKEY`.
+- The hardware check probes `OUT_BOTHCH?`.
 - The 2.0.5 entry says every query documented in the guide is still accepted; precisely, every documented query header without parameters. Parameters after `?` remain limited to `STL?` and `MMEMory:CATalog?` (so `WVDT? M50` is refused, as before).
 
 ## 2.0.5

@@ -153,6 +153,8 @@ const ACTION_HEADERS = [
   "MMEMory:DELete|RDIRectory|MDIRectory|COPY|MOVE|TRANsfer",
   "MMEMory:SAVE|LOAD:XML",
   "EQPHASE",
+  // Switches both outputs on or off; documented in 3.3 without a query form.
+  "OUT_BOTHCH",
 ].map((spec) => ({ spec, header: headerPattern(spec) }));
 
 export function assertIsQuery(cmd: string): void {
