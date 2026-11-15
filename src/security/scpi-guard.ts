@@ -7,9 +7,36 @@
  * query passes through, so these checks live there rather than in each tool.
  */
 
+/**
+ * Stable identifiers for every refusal, so the audit log can count and alert
+ * on them without parsing messages. "raw.disabled" and "schema.invalid" are
+ * recorded by the transport hook (src/audit/transport.ts), not thrown here.
+ */
+export const POLICY_RULES = [
+  "wire.empty",
+  "wire.too_long",
+  "wire.control_char",
+  "wire.non_ascii",
+  "wire.compound",
+  "query.not_a_query",
+  "query.common_not_allowed",
+  "query.action_command",
+  "query.parameters_not_allowed",
+  "query.parameters_invalid",
+  "host.port_not_allowed",
+  "host.not_allowed",
+  "host.not_private_lan",
+  "raw.disabled",
+  "schema.invalid",
+] as const;
+export type PolicyRule = (typeof POLICY_RULES)[number];
+
 /** Raised when a command or argument violates the security policy. */
 export class ScpiPolicyError extends Error {
-  constructor(message: string) {
+  constructor(
+    readonly rule: PolicyRule,
+    message: string
+  ) {
     super(message);
     this.name = "ScpiPolicyError";
   }
@@ -25,15 +52,16 @@ export class ScpiPolicyError extends Error {
  */
 export function assertWireSafe(cmd: string): void {
   if (cmd.length === 0) {
-    throw new ScpiPolicyError("Empty SCPI command.");
+    throw new ScpiPolicyError("wire.empty", "Empty SCPI command.");
   }
   if (cmd.length > 512) {
-    throw new ScpiPolicyError("SCPI command too long (max 512 characters).");
+    throw new ScpiPolicyError("wire.too_long", "SCPI command too long (max 512 characters).");
   }
   for (let i = 0; i < cmd.length; i++) {
     const code = cmd.charCodeAt(i);
     if (code < 0x20 || code > 0x7e) {
       throw new ScpiPolicyError(
+        code > 0x7f ? "wire.non_ascii" : "wire.control_char",
         `SCPI command contains a control or non-ASCII character at position ${i} (code ${code}). ` +
           "Embedded newlines would inject additional commands."
       );
@@ -41,6 +69,7 @@ export function assertWireSafe(cmd: string): void {
   }
   if (cmd.includes(";")) {
     throw new ScpiPolicyError(
+      "wire.compound",
       "SCPI compound commands (';') are not allowed. Send one command per call."
     );
   }
@@ -162,6 +191,7 @@ export function assertIsQuery(cmd: string): void {
   const m = QUERY_PATTERN.exec(cmd.trim());
   if (!m) {
     throw new ScpiPolicyError(
+      "query.not_a_query",
       `Not a SCPI query: "${cmd}". A query must be a single header ending in '?' ` +
         "(e.g. 'C1:BSWV?'). Commands that change instrument state are not allowed here."
     );
@@ -171,6 +201,7 @@ export function assertIsQuery(cmd: string): void {
 
   if (prefix === "*" && !COMMON_QUERIES.has(name)) {
     throw new ScpiPolicyError(
+      "query.common_not_allowed",
       `"*${name}?" is not allowed: only the common queries ` +
         `${[...COMMON_QUERIES].map((q) => `*${q}?`).join(", ")} are permitted.`
     );
@@ -179,6 +210,7 @@ export function assertIsQuery(cmd: string): void {
     const action = ACTION_HEADERS.find((a) => a.header.test(header));
     if (action) {
       throw new ScpiPolicyError(
+        "query.action_command",
         `"${header}?" is not allowed: ${action.spec} is an action command with no documented ` +
           "query form, and the instrument might run it."
       );
@@ -188,12 +220,14 @@ export function assertIsQuery(cmd: string): void {
     const rule = QUERY_PARAMETER_RULES.find((r) => r.header.test(header));
     if (!rule) {
       throw new ScpiPolicyError(
+        "query.parameters_not_allowed",
         `Parameters after '?' are only allowed for ${QUERY_PARAMETER_RULES.map((r) => r.name).join(", ")}. ` +
           `"${cmd}" could be interpreted as a command by the instrument.`
       );
     }
     if (!rule.params.test(params.trim())) {
       throw new ScpiPolicyError(
+        "query.parameters_invalid",
         `Parameters "${params.trim()}" are not a documented form for ${rule.name}.`
       );
     }

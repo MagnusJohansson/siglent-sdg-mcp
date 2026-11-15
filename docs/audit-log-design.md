@@ -1,6 +1,6 @@
 # Design: audit log and OpenTelemetry export
 
-**Status:** proposal, revision 4 (after three design reviews). Not implemented. Applies to siglent-sdg-mcp and siglent-sds-mcp; the same document is in both repositories. Targets: the JSONL audit log in 2.1.0, the OpenTelemetry export in 2.2.0.
+**Status:** revision 4, after three design reviews; decisions confirmed. The JSONL audit log is **implemented in siglent-sdg-mcp 2.1.0** (see "Implementation notes"); siglent-sds-mcp follows. The OpenTelemetry export (2.2.0) is not implemented. The same document is in both repositories.
 
 ## Problem
 
@@ -226,6 +226,23 @@ What this design does and doesn't give:
 2. Both: add `rule` to `ScpiPolicyError` (no behaviour change). Make the hardware checks drain stderr.
 3. Both, **2.1.0:** the audit core, the non-blocking writer (also for the human-readable stderr lines), the stderr and file sinks, the security and full levels, the transport and connection hooks, shutdown handling, and the tests. The threat-model row changes to describe what's recorded, with the integrity limits for a local-only log. The README gets an "Audit log" section.
 4. Both, **2.2.0:** the OTLP sink, the startup export check, the README's collector example with an ingest-only key, and the threat-model update for the off-machine copy.
+
+## Implementation notes (siglent-sdg-mcp 2.1.0)
+
+Where the implementation makes the design concrete or departs from it:
+
+- **Causes:** two more values. `socket`: the instrument or the network closed the socket. `internal`: no call involved (startup, malformed lines, loss reports).
+- **Disconnect reasons:** `init_failed` added, for a connection that opened but failed `CHDR OFF` or `*IDN?`.
+- **`mcp.malformed`** carries the transport's error message, not the raw line: the stdio transport doesn't pass the line on.
+- **Schema refusals** are `guard.refused` with `guard: schema`, `rule: schema.invalid`, recognised by the SDK's "Input validation error" tool result. The contract test pins that text.
+- **Rule list, final:** `wire.empty`, `wire.too_long`, `wire.control_char`, `wire.non_ascii`, `wire.compound`, `query.not_a_query`, `query.common_not_allowed`, `query.action_command`, `query.parameters_not_allowed`, `query.parameters_invalid`, `host.port_not_allowed`, `host.not_allowed`, `host.not_private_lan`, `raw.disabled`, `schema.invalid`. There's no `query.read_and_clear`: `*ESR?` is refused by the common-query allowlist (`query.common_not_allowed`). There's no `query.empty_node`: an empty node fails the query shape (`query.not_a_query`).
+- **"A lint rule"** is a unit test that scans `src/` for `console.` and `process.stderr` outside `src/audit/`; the project has no linter.
+- **Context:** the ambient context is read only at the synchronous start of `connect`, `disconnect`, `sendCommand` and `query`, which tools call directly. Everything later (queue drain, timers, socket and write callbacks) uses the context captured in the `QueuedQuery`, or a synthetic one.
+- **Arguments:** each string is bounded at 512 characters, and the arguments as a whole at 4096.
+- **The loss warning** on stderr is given when a loss is reported, once the sink accepts records again, not when the drop happens. At that moment stderr is usually the thing that's stuck, so a warning written then would be dropped too.
+- **Shutdown** flushes for up to 1 s, then writes `server.stop`, then flushes for up to 1 s more, so a queue still full from a stalled stderr doesn't drop the final loss count.
+- **A connect still in progress at shutdown** gets no final `instrument.connect` event.
+- **sdg has no idle close or reconnect,** so the idle-close test applies to sds only.
 
 ## Decisions
 

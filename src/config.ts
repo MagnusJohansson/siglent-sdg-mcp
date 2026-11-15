@@ -1,4 +1,11 @@
+import * as path from "node:path";
 import type { HostPolicy } from "./security/host-policy.js";
+
+/** Where audit events go (SIGLENT_AUDIT_LOG), and at which level. */
+export type AuditConfig =
+  | { sink: "stderr"; level: "security" | "full" }
+  | { sink: "file"; level: "full"; path: string }
+  | { sink: "off" };
 
 export interface ServerConfig {
   /** Instrument address used for auto-connect and as the default for `connect`. */
@@ -9,6 +16,23 @@ export interface ServerConfig {
   rawScpiEnabled: boolean;
   /** Human-readable notes about the effective configuration, logged at startup. */
   notes: string[];
+  audit: AuditConfig;
+}
+
+/**
+ * SIGLENT_AUDIT_LOG: unset = security events on stderr; "stderr" = the full
+ * trail on stderr; an absolute path = the full trail in that file; "off" =
+ * nothing. A relative path is a configuration error (fail closed).
+ */
+function parseAudit(value: string | undefined): AuditConfig {
+  const v = (value ?? "").trim();
+  if (v === "") return { sink: "stderr", level: "security" };
+  if (v.toLowerCase() === "off") return { sink: "off" };
+  if (v.toLowerCase() === "stderr") return { sink: "stderr", level: "full" };
+  if (!path.isAbsolute(v)) {
+    throw new Error(`SIGLENT_AUDIT_LOG must be "off", "stderr" or an absolute file path, got "${v}".`);
+  }
+  return { sink: "file", level: "full", path: v };
 }
 
 const DEFAULT_PORT = 5025;
@@ -73,5 +97,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     },
     rawScpiEnabled,
     notes,
+    audit: parseAudit(env.SIGLENT_AUDIT_LOG),
   };
 }

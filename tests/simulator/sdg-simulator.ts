@@ -56,6 +56,9 @@ export class SdgSimulator {
   }
 
   /** Lines received, excluding *OPC? sync barriers. */
+  /** Queries (upper case) the simulator never answers, to exercise timeouts. */
+  readonly silent = new Set<string>();
+
   commands(): string[] {
     return this.received.filter((l) => l !== "*OPC?");
   }
@@ -83,6 +86,7 @@ export class SdgSimulator {
 
   private process(line: string): string | undefined {
     const upper = line.toUpperCase();
+    if (this.silent.has(upper)) return undefined;
 
     if (upper === "*IDN?") return SIM_IDN;
     // Operation complete: used by tests as a sync barrier.

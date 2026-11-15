@@ -1,53 +1,112 @@
 #!/usr/bin/env node
 
+import * as fs from "node:fs";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { loadConfig, type ServerConfig } from "./config.js";
+import { audit, JsonlSink, logSync, withAuditContext, type AuditSink } from "./audit/audit.js";
+import { FdWriter } from "./audit/writer.js";
+import { loadConfig, type AuditConfig, type ServerConfig } from "./config.js";
 import { connection } from "./connection.js";
-import { createServer } from "./server.js";
-
-// Prevent uncaught errors from killing the MCP server process
-process.on("uncaughtException", (err) => {
-  console.error("Uncaught exception:", err);
-});
-process.on("unhandledRejection", (reason) => {
-  console.error("Unhandled rejection:", reason);
-});
+import { connectServer, createServer, SERVER_VERSION } from "./server.js";
 
 // Fail closed on invalid configuration: exit non-zero instead of starting
-// with a security setting silently ignored.
+// with a security setting silently ignored. These are the only synchronous
+// stderr writes; everything after goes through the non-blocking queue.
 let config: ServerConfig;
 try {
   config = loadConfig();
 } catch (err) {
-  console.error(`Configuration error: ${err instanceof Error ? err.message : String(err)}`);
+  logSync(`Configuration error: ${err instanceof Error ? err.message : String(err)}`);
   process.exit(1);
 }
-for (const note of config.notes) {
-  console.error(note);
+
+// One writer for everything on stderr, so nothing can block on a full pipe
+// and nothing interleaves with an audit event.
+const stderr = new FdWriter(2);
+const sinks: AuditSink[] = [];
+if (config.audit.sink === "stderr") {
+  sinks.push(new JsonlSink("stderr", config.audit.level, stderr));
+} else if (config.audit.sink === "file") {
+  let fd: number;
+  try {
+    fd = fs.openSync(config.audit.path, "a", 0o600);
+  } catch (err) {
+    logSync(
+      `Configuration error: can't open the audit log ${config.audit.path}: ` +
+        (err instanceof Error ? err.message : String(err))
+    );
+    process.exit(1);
+  }
+  sinks.push(new JsonlSink("file", "full", new FdWriter(fd)));
 }
+audit.configure({ service: { name: "siglent-sdg-mcp", version: SERVER_VERSION }, sinks, stderr });
+
+// Prevent uncaught errors from killing the MCP server process
+process.on("uncaughtException", (err) => {
+  audit.log(`Uncaught exception: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
+});
+process.on("unhandledRejection", (reason) => {
+  audit.log(`Unhandled rejection: ${reason instanceof Error ? (reason.stack ?? reason.message) : String(reason)}`);
+});
+// Node's default printer for process warnings writes to stderr synchronously.
+process.removeAllListeners("warning");
+process.on("warning", (warning) => {
+  audit.log(`${warning.name}: ${warning.message}`);
+});
+
+for (const note of config.notes) {
+  audit.log(note);
+}
+audit.serverStart({
+  rawScpiEnabled: config.rawScpiEnabled,
+  allowedHosts: config.hostPolicy.allowedHosts,
+  allowedPorts: config.hostPolicy.allowedPorts,
+  audit: describeAudit(config.audit),
+});
 const server = createServer(config);
+
+function describeAudit(a: AuditConfig): string {
+  if (a.sink === "off") return "off";
+  if (a.sink === "file") return `file:${a.path}`;
+  return `stderr:${a.level}`;
+}
+
+// Stop on stdin end (the client has gone) or a signal. An open instrument
+// socket would otherwise keep the process alive after stdin closes.
+let stopping = false;
+async function shutdown(reason: "stdin_closed" | "signal"): Promise<void> {
+  if (stopping) return;
+  stopping = true;
+  connection.disconnect("shutdown", { cause: "shutdown" });
+  // Drain first, so server.stop (last, with the final loss count) isn't
+  // dropped by a queue that's still full from a stalled stderr.
+  await audit.flush(1000);
+  audit.serverStop(reason);
+  await audit.flush(1000);
+  process.exit(0);
+}
 
 async function main(): Promise<void> {
   const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("siglent-sdg-mcp server running on stdio");
+  await connectServer(server, transport, config);
+  process.stdin.on("end", () => void shutdown("stdin_closed"));
+  process.on("SIGTERM", () => void shutdown("signal"));
+  process.on("SIGINT", () => void shutdown("signal"));
+  audit.log("siglent-sdg-mcp server running on stdio");
 
   // Auto-connect if env var is set (fire-and-forget, don't block MCP startup)
   const autoIp = config.defaultHost;
   if (autoIp) {
     // connect() applies the host policy.
-    connection.connect(autoIp, config.defaultPort).then(
-      (idn) => console.error(`Auto-connected to ${autoIp}: ${idn}`),
+    withAuditContext({ cause: "auto-connect" }, () => connection.connect(autoIp, config.defaultPort)).then(
+      (idn) => audit.log(`Auto-connected to ${autoIp}: ${idn}`),
       (err) => {
-        console.error(
-          `Auto-connect to ${autoIp} failed: ${err instanceof Error ? err.message : String(err)}`
-        );
-        console.error("Use the 'connect' tool to connect manually.");
+        audit.log(`Auto-connect to ${autoIp} failed: ${err instanceof Error ? err.message : String(err)}`);
+        audit.log("Use the 'connect' tool to connect manually.");
       }
     );
   }
 }
 
 main().catch((error) => {
-  console.error("Startup error:", error);
+  audit.log(`Startup error: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`);
 });

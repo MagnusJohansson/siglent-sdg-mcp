@@ -1,10 +1,28 @@
 # Changelog
 
-## Unreleased
+## 2.1.0
+
+### Added
+
+- **Audit log.** The server records what it refused, what it connected to and, optionally, every line it wrote to the generator, as JSON lines. Configured with `SIGLENT_AUDIT_LOG`; see the README's "Audit log" section and `docs/audit-log-design.md`.
+  - By default, security events go to stderr: every refusal (`guard.refused`) with a stable rule id, `instrument.connect` and `instrument.disconnect`, every state-changing tool call (`readOnlyHint: false`) with its arguments and result, `server.start`/`server.stop` and `audit.loss`.
+  - `SIGLENT_AUDIT_LOG=stderr` gives the full trail on stderr: also every MCP message, read-only calls and every instrument write with its reply. An absolute path gives the full trail in that file (mode `0600`); `off` disables it. A relative path, or a file that can't be opened, stops the server at startup.
+  - Refusals the SDK makes before a tool runs are recorded too: arguments that fail the tool's schema (`schema.invalid`, e.g. a newline in `load`) and calls to `scpi_command` while it's disabled (`raw.disabled`). Lines that aren't valid JSON-RPC are recorded as `mcp.malformed`.
+  - Every event carries the JSON-RPC request id of the call that caused it, including instrument writes made later from the query queue.
+  - Each sink numbers its records without gaps; lost records are counted and reported with `audit.loss` (and a warning on stderr) once the sink accepts records again.
+- `ScpiPolicyError` carries a stable `rule` id (`query.not_a_query`, `wire.compound`, `host.not_allowed`, ...).
 
 ### Changed
 
-- The connect allowlist is enforced inside `SiglentConnection.connect`, the one path every connection takes, instead of separately in the `connect` tool and in auto-connect. No behaviour change: the same targets are allowed and refused, and a refused connect still leaves the current connection, or a connect in progress, untouched. A path added later can't skip the check. siglent-sds-mcp already works this way. It's also groundwork for an audit log, which needs one place to record connect refusals.
+- **All stderr output goes through one non-blocking writer**, the human-readable lines and Node's process warnings included. A client that pipes the server's stderr and never reads it can no longer stall tool calls once the pipe is full; lines are dropped and counted instead.
+- **The server exits when stdin closes.** Until now an open instrument connection kept the process alive after the client had gone. On stdin end, SIGTERM or SIGINT, the server closes the instrument connection, flushes the audit log (up to 2 s) and exits.
+- **Docker:** the server still writes no files by default, so `--read-only` works unchanged. A file audit log needs a mounted directory writable by UID 1000; `scripts/check-image.sh` checks that.
+- The connect allowlist is enforced inside `SiglentConnection.connect`, the one path every connection takes, instead of separately in the `connect` tool and in auto-connect. No behaviour change: the same targets are allowed and refused, and a refused connect still leaves the current connection, or a connect in progress, untouched. A path added later can't skip the check. siglent-sds-mcp already works this way, and the audit log records connect refusals in this one place.
+
+### Tests
+
+- Audit tests run the MCP server against the simulator and check attribution with parallel calls, after a timeout and when a disconnect cuts queued queries off, the per-sink numbering, bounded strings, and that every rule id is produced. A contract test pins the SDK behaviours the transport hooks rely on. Process tests check that stdout stays JSON-RPC, shutdown on stdin end and SIGTERM, the file mode, fail-closed startup, and that 2,000 tool calls complete with stderr unread.
+- The hardware check drains the server's stderr and uses the audit log as a second oracle: every security probe must be recorded as `guard.refused` with its expected rule, and no probe's payload may appear in any instrument write.
 
 ## 2.0.7
 

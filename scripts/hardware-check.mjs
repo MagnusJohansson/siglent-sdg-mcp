@@ -24,11 +24,15 @@
  *   front panel afterwards if needed.
  *
  * Security checks verify the instrument state by reading it back, not just
- * by looking at the error the server returned.
+ * by looking at the error the server returned. The audit log is a second,
+ * independent oracle: every probe must be recorded as guard.refused with the
+ * expected rule, and no probe's payload may appear in any scpi.write.
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { fileURLToPath } from "node:url";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 const ip = process.argv[2];
@@ -39,6 +43,13 @@ if (!ip || ip.startsWith("--") || (dockerFlag > 0 && !dockerImage)) {
   process.exit(2);
 }
 const serverPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "build", "index.js");
+
+// The server writes its full audit trail here. With --docker the directory is
+// mounted at /audit and must be writable by the container's UID 1000.
+const auditDir = mkdtempSync(path.join(tmpdir(), "sdg-hardware-check-"));
+chmodSync(auditDir, 0o777);
+const auditFile = path.join(auditDir, "audit.jsonl");
+const auditEnv = { SIGLENT_AUDIT_LOG: dockerImage ? "/audit/audit.jsonl" : auditFile };
 
 let passed = 0;
 let failed = 0;
@@ -60,6 +71,7 @@ function serverCommand(serverEnv) {
     args: [
       "run", "--rm", "-i",
       "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
+      "-v", `${auditDir}:/audit`,
       ...Object.entries(serverEnv).flatMap(([k, val]) => ["-e", `${k}=${val}`]),
       dockerImage,
     ],
@@ -75,11 +87,14 @@ function serverCommand(serverEnv) {
 
 async function startServer(extraEnv = {}) {
   const transport = new StdioClientTransport({
-    ...serverCommand({ SIGLENT_SDG_IP: ip, ...extraEnv }),
+    ...serverCommand({ SIGLENT_SDG_IP: ip, ...auditEnv, ...extraEnv }),
     stderr: "pipe",
   });
   const client = new Client({ name: "hardware-check", version: "1.0.0" });
   await client.connect(transport);
+  // Drain stderr: a pipe nobody reads fills up. The server doesn't stall on it
+  // (its writer is non-blocking), but it would drop audit events.
+  transport.stderr?.on("data", () => {});
   const call = async (name, args = {}) => {
     try {
       const r = await client.callTool({ name, arguments: args });
@@ -171,18 +186,19 @@ async function main() {
   // harmless frequency change (1000 Hz -> 1234 Hz), never "output ON".
   console.log("\n  Security (payload: change frequency to 1234 Hz; must stay 1000 Hz)");
   const payload = "C1:BSWV FRQ,1234";
+  // [label, tool, arguments, the rule the audit log must record]
   const attacks = [
-    ["F1 setter via scpi_query", "scpi_query", { command: payload }],
-    ["F1 compound query hides setter", "scpi_query", { command: `C1:BSWV?;${payload}` }],
-    ["F1 setter parameters after query header", "scpi_query", { command: "C1:BSWV? FRQ,1234" }],
-    ["F1 action command in query form (C1:TRIGger?)", "scpi_query", { command: "C1:TRIGger?" }],
-    ["F1 read-and-clear status query (*ESR?)", "scpi_query", { command: "*ESR?" }],
+    ["F1 setter via scpi_query", "scpi_query", { command: payload }, "query.not_a_query"],
+    ["F1 compound query hides setter", "scpi_query", { command: `C1:BSWV?;${payload}` }, "wire.compound"],
+    ["F1 setter parameters after query header", "scpi_query", { command: "C1:BSWV? FRQ,1234" }, "query.parameters_not_allowed"],
+    ["F1 action command in query form (C1:TRIGger?)", "scpi_query", { command: "C1:TRIGger?" }, "query.action_command"],
+    ["F1 read-and-clear status query (*ESR?)", "scpi_query", { command: "*ESR?" }, "query.common_not_allowed"],
     // Has no ON/OFF value in query form, and the output check after each probe
     // would catch an output switched on.
-    ["F1 both-outputs command in query form (OUT_BOTHCH?)", "scpi_query", { command: "OUT_BOTHCH?" }],
-    ["F2 newline injection in load", "configure_output", { channel: "C1", load: `50\n${payload}` }],
-    ["F2 compound injection in load", "configure_output", { channel: "C1", load: `50;${payload}` }],
-    ["F2 newline injection in cycles", "configure_burst", { channel: "C1", cycles: `1\n${payload}` }],
+    ["F1 both-outputs command in query form (OUT_BOTHCH?)", "scpi_query", { command: "OUT_BOTHCH?" }, "query.action_command"],
+    ["F2 newline injection in load", "configure_output", { channel: "C1", load: `50\n${payload}` }, "schema.invalid"],
+    ["F2 compound injection in load", "configure_output", { channel: "C1", load: `50;${payload}` }, "schema.invalid"],
+    ["F2 newline injection in cycles", "configure_burst", { channel: "C1", cycles: `1\n${payload}` }, "schema.invalid"],
   ];
   for (const [label, tool, args] of attacks) {
     r = await s.call(tool, args);
@@ -202,8 +218,48 @@ async function main() {
 
   await s.client.close();
 
+  // ---------------------------------------------------------------- audit
+  console.log("\n  Audit log (an independent record of what the server refused and wrote)");
+  const records = await readAudit();
+  const requestId = (tool, args) =>
+    records.find(
+      (r) => r["event.name"] === "mcp.request" && r["gen_ai.tool.name"] === tool &&
+        r["gen_ai.tool.call.arguments"] === JSON.stringify(args)
+    )?.["jsonrpc.request.id"];
+  const refusals = records.filter((r) => r["event.name"] === "guard.refused");
+  const unrecorded = attacks
+    .filter(([, tool, args, rule]) => {
+      const id = requestId(tool, args);
+      return id === undefined || !refusals.some((r) => r["jsonrpc.request.id"] === id && r.rule === rule);
+    })
+    .map(([label]) => label);
+  const f3 = refusals.some((r) => r.rule === "host.not_allowed" && r["server.address"] === probeHost);
+  check(
+    "every probe recorded as guard.refused with its rule",
+    unrecorded.length === 0 && f3,
+    unrecorded.length ? `missing: ${unrecorded.join("; ")}` : `${attacks.length + 1} probes`
+  );
+  const writes = records.filter((r) => r["event.name"] === "scpi.write").map((r) => String(r["scpi.command"]));
+  // A leak: a refused query sent as-is, or the frequency payload in any write.
+  const refusedQueries = new Set(attacks.filter(([, tool]) => tool === "scpi_query").map(([, , args]) => args.command));
+  const leaked = writes.filter((w) => refusedQueries.has(w) || w.includes("FRQ,1234"));
+  check("no probe's payload reached the wire", writes.length > 0 && leaked.length === 0, `${writes.length} writes${leaked.length ? `, leaked: ${leaked.join(", ")}` : ""}`);
+  rmSync(auditDir, { recursive: true, force: true });
+
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
+}
+
+/** The audit file, once the server has written its server.stop (it flushes on shutdown). */
+async function readAudit() {
+  for (let t = 0; t < 100; t++) {
+    const text = existsSync(auditFile) ? readFileSync(auditFile, "utf8") : "";
+    if (text.includes('"event.name":"server.stop"')) {
+      return text.split("\n").filter((l) => l.startsWith("{")).map((l) => JSON.parse(l));
+    }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error(`no server.stop in ${auditFile}`);
 }
 
 main().catch((err) => {
