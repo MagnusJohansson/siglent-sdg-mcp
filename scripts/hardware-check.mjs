@@ -4,6 +4,11 @@
  * stdio (the same path an MCP client uses).
  *
  * Usage:  npm run build && node scripts/hardware-check.mjs <instrument-ip>
+ *         node scripts/hardware-check.mjs <instrument-ip> --docker <image>
+ *
+ * --docker runs the server from a Docker image instead of build/, with the
+ * hardening flags the README documents (--read-only --cap-drop=ALL
+ * --security-opt=no-new-privileges).
  *
  * SAFETY
  * - Never asks for an output to be turned ON, not even as an attack payload:
@@ -27,8 +32,10 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 const ip = process.argv[2];
-if (!ip) {
-  console.error("Usage: node scripts/hardware-check.mjs <instrument-ip>");
+const dockerFlag = process.argv.indexOf("--docker");
+const dockerImage = dockerFlag > 0 ? process.argv[dockerFlag + 1] : undefined;
+if (!ip || ip.startsWith("--") || (dockerFlag > 0 && !dockerImage)) {
+  console.error("Usage: node scripts/hardware-check.mjs <instrument-ip> [--docker <image>]");
   process.exit(2);
 }
 const serverPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "build", "index.js");
@@ -41,11 +48,34 @@ function check(label, ok, detail = "") {
   console.log(`  ${ok ? "PASS" : "FAIL"}  ${label}${detail ? `  [${detail}]` : ""}`);
 }
 
+// The server's own environment. With --docker it goes into the container as
+// -e flags; the docker CLI itself only gets PATH, HOME and the variables
+// that select a daemon (DOCKER_HOST, DOCKER_CONTEXT), when they're set.
+function serverCommand(serverEnv) {
+  if (!dockerImage) {
+    return { command: process.execPath, args: [serverPath], env: { PATH: process.env.PATH ?? "", ...serverEnv } };
+  }
+  return {
+    command: "docker",
+    args: [
+      "run", "--rm", "-i",
+      "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
+      ...Object.entries(serverEnv).flatMap(([k, val]) => ["-e", `${k}=${val}`]),
+      dockerImage,
+    ],
+    env: {
+      PATH: process.env.PATH ?? "",
+      HOME: process.env.HOME ?? "",
+      ...Object.fromEntries(
+        ["DOCKER_HOST", "DOCKER_CONTEXT"].filter((k) => process.env[k]).map((k) => [k, process.env[k]])
+      ),
+    },
+  };
+}
+
 async function startServer(extraEnv = {}) {
   const transport = new StdioClientTransport({
-    command: process.execPath,
-    args: [serverPath],
-    env: { PATH: process.env.PATH ?? "", SIGLENT_SDG_IP: ip, ...extraEnv },
+    ...serverCommand({ SIGLENT_SDG_IP: ip, ...extraEnv }),
     stderr: "pipe",
   });
   const client = new Client({ name: "hardware-check", version: "1.0.0" });
