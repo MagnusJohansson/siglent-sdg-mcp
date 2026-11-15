@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- The connect allowlist is enforced inside `SiglentConnection.connect`, the one path every connection takes, instead of separately in the `connect` tool and in auto-connect. No behaviour change: the same targets are allowed and refused, and a refused connect still leaves the current connection, or a connect in progress, untouched. A path added later can't skip the check. siglent-sds-mcp already works this way. It's also groundwork for an audit log, which needs one place to record connect refusals.
+
 ## 2.0.7
 
 ### Security

@@ -1,8 +1,22 @@
 import * as net from "node:net";
+import { assertConnectAllowed, type HostPolicy } from "./security/host-policy.js";
 import { assertIsQuery, assertWireSafe } from "./security/scpi-guard.js";
 
 const DEFAULT_PORT = 5025;
 const DEFAULT_TIMEOUT = 5000;
+
+export interface ConnectionOptions {
+  /** Where connect() may go. Enforced here, so every connect path is covered. */
+  hostPolicy: HostPolicy;
+  /** Port used when connect() is called without one (SIGLENT_SDG_PORT). */
+  defaultPort: number;
+}
+
+const DEFAULT_OPTIONS: ConnectionOptions = {
+  // Until configured: private-LAN IP addresses on the standard port only.
+  hostPolicy: { allowedHosts: [], allowedPorts: [DEFAULT_PORT] },
+  defaultPort: DEFAULT_PORT,
+};
 
 interface QueuedQuery {
   cmd: string;
@@ -31,8 +45,23 @@ export class SiglentConnection {
    * called) must not touch the shared socket, and must not disconnect it.
    */
   private connectGeneration = 0;
+  private options: ConnectionOptions;
 
-  async connect(host: string, port: number = DEFAULT_PORT): Promise<string> {
+  constructor(options: Partial<ConnectionOptions> = {}) {
+    this.options = { ...DEFAULT_OPTIONS, ...options };
+  }
+
+  /** Apply the server configuration (host policy, default port). */
+  configure(options: Partial<ConnectionOptions>): void {
+    this.options = { ...this.options, ...options };
+  }
+
+  async connect(host: string, port: number = this.options.defaultPort): Promise<string> {
+    // Every connect path (the connect tool, auto-connect) passes through here.
+    // Checked first: a refused target must not supersede an attempt in
+    // progress or drop the current connection.
+    assertConnectAllowed(host, port, this.options.hostPolicy);
+
     const generation = ++this.connectGeneration;
     const superseded = () => generation !== this.connectGeneration;
 

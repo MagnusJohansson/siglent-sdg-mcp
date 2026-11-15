@@ -3,7 +3,6 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { loadConfig, type ServerConfig } from "./config.js";
 import { connection } from "./connection.js";
-import { assertConnectAllowed } from "./security/host-policy.js";
 import { createServer } from "./server.js";
 
 // Prevent uncaught errors from killing the MCP server process
@@ -36,21 +35,16 @@ async function main(): Promise<void> {
   // Auto-connect if env var is set (fire-and-forget, don't block MCP startup)
   const autoIp = config.defaultHost;
   if (autoIp) {
-    const port = config.defaultPort;
-    Promise.resolve()
-      .then(() => {
-        assertConnectAllowed(autoIp, port, config.hostPolicy);
-        return connection.connect(autoIp, port);
-      })
-      .then(
-        (idn) => console.error(`Auto-connected to ${autoIp}: ${idn}`),
-        (err) => {
-          console.error(
-            `Auto-connect to ${autoIp} failed: ${err instanceof Error ? err.message : String(err)}`
-          );
-          console.error("Use the 'connect' tool to connect manually.");
-        }
-      );
+    // connect() applies the host policy.
+    connection.connect(autoIp, config.defaultPort).then(
+      (idn) => console.error(`Auto-connected to ${autoIp}: ${idn}`),
+      (err) => {
+        console.error(
+          `Auto-connect to ${autoIp} failed: ${err instanceof Error ? err.message : String(err)}`
+        );
+        console.error("Use the 'connect' tool to connect manually.");
+      }
+    );
   }
 }
 
