@@ -1,6 +1,6 @@
 # Design: audit log and OpenTelemetry export
 
-**Status:** proposal, revision 2 (after one design review). Not implemented. Applies to siglent-sdg-mcp and siglent-sds-mcp; the same document is in both repositories. Targets: the JSONL audit log in 2.1.0, the OpenTelemetry export in 2.2.0.
+**Status:** proposal, revision 3 (after two design reviews). Not implemented. Applies to siglent-sdg-mcp and siglent-sds-mcp; the same document is in both repositories. Targets: the JSONL audit log in 2.1.0, the OpenTelemetry export in 2.2.0.
 
 ## Problem
 
@@ -35,10 +35,10 @@ Both servers have a single choke point for instrument traffic: `SiglentConnectio
 | Connection | `connect`, `close`/`disconnect`, (sds) idle close and the resets after a timeout or an out-of-step reply | `instrument.connect`, `instrument.disconnect` |
 
 **Why the transport, not the tool callbacks.** The MCP SDK validates arguments against each tool's schema before the callback runs, so a wrapper around the callbacks would miss calls with invalid arguments, calls to unknown tools, and every non-tool message. Reviewed against `@modelcontextprotocol/sdk` 1.32.2 (both lockfiles):
-- `Protocol.connect` assigns `transport.onmessage` before `start()` attaches the stdin listener, so a wrapper installed right after `await server.connect()` sees every message.
+- The hook is installed **before** `server.connect()`, as an accessor property for `onmessage` on the transport instance. Whatever handler the SDK assigns is wrapped as it's assigned, so the hook doesn't depend on timing. (Installing it after `await server.connect()` would also work today, because stdin data arrives on a later libuv callback than that continuation, but that's an ordering property, not a guarantee.)
 - `_onrequest` schedules the handler with a promise created synchronously inside `onmessage`, so an `AsyncLocalStorage` context entered in the wrapper propagates into the tool callback.
 - Responses go through `transport.send`, looked up at call time, so an instance-level wrapper sees them.
-A test pins this behaviour, so an SDK upgrade that changes it fails CI. Wrapping before `connect()` would also see messages, but couldn't wrap the dispatch in a context.
+A contract test pins this behaviour, so an SDK upgrade that changes it fails CI: a request written to stdin immediately after `connect()` reaches a tool callback with its audit context, and its response passes through the `send` wrapper.
 
 **What the transport doesn't see.** A line that isn't valid JSON, or isn't a valid JSON-RPC message, never reaches `onmessage`. The stdio transport reports it to `onerror` and sends nothing back. Wrapping `onerror` records it as `mcp.malformed`, with the raw line bounded.
 
@@ -70,8 +70,8 @@ Common to every event:
 |---|---|---|
 | `time` | `2026-11-16T09:12:03.412Z` | ISO 8601, UTC, ms |
 | `event.name` | `guard.refused` | One of the event names below, prefixed `siglent.audit.` in OTEL |
-| `audit.seq` | `57` | Per-process counter, starts at 1, assigned at emission. A missing number in the sink means a lost event. |
-| `service.instance.id` | `3f0c…` | Random UUID per process start. Together with `audit.seq` it identifies an event uniquely. |
+| `audit.sink`, `audit.seq` | `stderr`, `57` | Each sink numbers the events it accepts, starting at 1. A missing number within one sink means an event lost on the way to that sink. Events below a sink's level are never given a number by it, so a lower level doesn't create gaps. |
+| `service.instance.id` | `3f0c…` | Random UUID per process start. Together with `audit.sink` and `audit.seq` it identifies a record uniquely. |
 | `service.name`, `service.version` | `siglent-sdg-mcp`, `2.1.0` | |
 | `jsonrpc.request.id` | `"12"` | The request that caused the event, as a string. **Omitted** when there is none (OTEL attributes can't be null). |
 | `cause` | `tool-call` | `tool-call`, `auto-connect`, `reconnect`, `idle-close`, `reset`, `shutdown` |
@@ -86,15 +86,16 @@ Per event (**S** = also at the default security level, see "Sinks and levels"):
 | `guard.refused` | S | `guard` (`wire`, `query`, `command`, `binary`, `host`, `raw-scpi`), `rule` (see below), `scpi.command` (bounded) or `server.address`/`server.port`, `error.message` (bounded) |
 | `instrument.connect` | S | `server.address`, `server.port`, `outcome` (`connected`, `refused_by_policy`, `failed`, `superseded`), `instrument.idn` |
 | `instrument.disconnect` | S | `server.address`, `reason` (`requested`, `replaced`, `idle`, `reset_after_timeout`, `reset_out_of_step`, `socket_error`, `socket_closed`, `shutdown`) |
-| `mcp.request` | full | Requests and notifications: `mcp.method.name`, `gen_ai.tool.name` (tools/call), `gen_ai.tool.call.arguments` (bounded, see "Content limits"), the registered tool's annotations (`read_only_hint`, `destructive_hint`), `client.name` and `client.version` from `initialize` with `client.self_reported: true`, `mcp.protocol.version` |
-| `mcp.response` | full | `outcome` (`ok`, `tool_error`, `jsonrpc_error`), `error.type`, `rpc.status_code` for JSON-RPC errors, `error.message` (bounded), a content summary (types and byte sizes, not content), `duration_ms` |
+| `mcp.request` | full; S for high-impact tools | Requests and notifications: `mcp.method.name`, `gen_ai.tool.name` (tools/call), `gen_ai.tool.call.arguments` (bounded, see "Content limits"), the registered tool's annotations (`read_only_hint`, `destructive_hint`), `client.name` and `client.version` from `initialize` with `client.self_reported: true`, `mcp.protocol.version` |
+| `mcp.response` | full; S for high-impact tools | `outcome` (`ok`, `tool_error`, `jsonrpc_error`), `error.type`, `rpc.status_code` for JSON-RPC errors, `error.message` (bounded), a content summary (types and byte sizes, not content), `duration_ms` |
 | `mcp.malformed` | full | The raw line (bounded) and the parse error |
 | `scpi.write` | full | `scpi.command` (bounded), `scpi.kind`, `server.address`, `server.port`, `scpi.write_id` |
-| `scpi.result` | full | `scpi.write_id`, `outcome` (`written`, `replied`, `timeout`, `write_failed`, `out_of_step`, `connection_closed`, `not_written`), `reply.bytes`, `reply.text` (text replies only, bounded), `duration_ms` |
+| `scpi.result` | full | `scpi.write_id` (exactly one result per id), `outcome` (`written`, `replied`, `timeout`, `write_failed`, `out_of_step`, `connection_closed`, `not_written`), `reply.bytes`, `reply.text` (text replies only, bounded), `duration_ms` |
 
 Notes:
 - **`scpi.kind`** is `command` for anything that changes state, `query`, `binary-query`, or `opc` for the pacing `*OPC?`. In sds, `sendCommand` writes the setter as the `pre` of an `*OPC?` query (`CHDR OFF` at connect too); that setter is kind `command`, so an alert on `scpi.kind = command` catches every setter in both servers.
-- **`scpi.write` is emitted inside the write path, immediately before each `socket.write`.** An attempt is on record even if the process dies during the write. When sds skips the delayed `*OPC?` because the socket was reset during the gap, no `scpi.write` is emitted for it, and the query's `scpi.result` is `not_written`.
+- **`scpi.write` is emitted inside the write path, immediately before each `socket.write`.** An attempt is on record even if the process dies during the write. - **Write ids are allocated when a write is planned**, at enqueue, one per line: an sds setter gets two (the `command` and its `opc`). Each id gets exactly one `scpi.result`. A write that never reached the socket gets `not_written`; one that was written but whose connection closed before the reply gets `connection_closed`. So when sds skips the delayed `*OPC?` because the socket was reset during the gap, the setter's id gets `written`, the `*OPC?` id gets `not_written` (it has no `scpi.write`), and the query's rejection by `close()` shows in its `mcp.response`, not as a second result.
+- **High-impact tools** are recorded at the security level too, request and response. They are the tools annotated `destructiveHint: true` (today `scpi_command` in both servers, and `reset` in sdg), plus a per-server list of tools with a physical effect the annotation doesn't capture: in sdg, `configure_output`, which can switch an output on. When raw SCPI is enabled, every `scpi_command` call is the most security-relevant event the server produces, and it shouldn't need the full trail. Whether `configure_output` should carry `destructiveHint` itself is a separate question, out of scope here.
 - **`notifications/cancelled`** is recorded as an `mcp.request`. Cancelling a call doesn't stop instrument writes it has already queued; the log shows both.
 - **A disabled `scpi_command`.** When raw SCPI is off, `scpi_command` isn't registered, so a call to it is just an unknown tool to the SDK. The transport wrapper records it as `guard.refused` with `guard: raw-scpi`, `rule: raw.disabled`, in addition to the `mcp.request`. A model asking for raw commands is worth knowing about.
 
@@ -129,31 +130,31 @@ Two tests keep the list honest. One checks that every `throw new ScpiPolicyError
 | an absolute path | that file, created with mode `0600`, appended | full |
 | `off` | none | — |
 
-- **The security level** covers `server.start`/`server.stop`, `audit.loss`, `guard.refused` and `instrument.connect`/`disconnect`. That's a handful of lines per session in normal use, and it's what the problem statement asks for: a refusal no longer goes unnoticed. The full trail (`mcp.*`, `scpi.*`) is 10 to 20 events per configure call, so it's opt-in.
+- **The security level** covers `server.start`/`server.stop`, `audit.loss`, `guard.refused`, `instrument.connect`/`disconnect`, and requests and responses for the high-impact tools. That's a handful of lines per session in normal use, and it's what the problem statement asks for: a refusal no longer goes unnoticed. The full trail (`mcp.*`, `scpi.*`) is 10 to 20 events per configure call, so it's opt-in.
 - **OTLP (2.2.0)** is enabled by the standard `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, and always receives the full trail. It's independent of `SIGLENT_AUDIT_LOG`: `off` plus an endpoint means OTLP only. The standard OTEL variables configure it (`OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`, ...), with no server-specific duplicates.
 - **Never stdout.** Stdout carries the MCP protocol. A test starts the server, makes calls that produce every event type, and checks that every line on stdout parses as JSON-RPC.
 
 ## Delivery and failure behaviour
 
 - **Non-blocking writes.** On Linux, Node writes to pipes and files synchronously. A client that pipes the server's stderr and never reads it would fill the pipe (about 64 KB) and stall the event loop, and with it every tool call; so would a file on a hung network filesystem. The audit writer therefore never writes on the event loop. Events go into a bounded in-memory queue (4096 events); one `fs.write` at a time drains it on the libuv thread pool, to fd 2 or to the file. A stuck write ties up one pool thread, never the event loop. When the queue is full, new events are dropped and counted.
-- **One event, one write.** Each event is serialised to a single line of at most 4096 bytes (`PIPE_BUF` on Linux) and written with one `fs.write`. A write that size to a pipe is atomic, so an event can't be split by the server's other stderr lines. Over-long events are cut field by field, longest first, and marked truncated. A short write or `EAGAIN` (if the descriptor is non-blocking) is retried from the remaining bytes, so lines are never split by the writer itself.
-- **The server's existing human-readable stderr lines** (startup notes, auto-connect results, idle close) are still written synchronously. They're a few lines per session, so the stall risk is small, but it exists, and the README states it.
+- **All stderr output goes through the same queue.** The server's human-readable lines (startup notes, auto-connect results, the sds idle-close message, the `uncaughtException`/`unhandledRejection` handlers in `src/index.ts`, and the loss warning itself) use one `log()` helper that enqueues them like audit events; `console.error` isn't used in `src/` any more, and a lint rule keeps it that way. So the writer is the only thing that ever writes to fd 2: nothing on the event loop can block on a full pipe, and nothing can interleave with an event. The loss warning is only enqueued, never written directly, so a stuck pipe produces drops, not a stall. Human-readable lines are dropped and counted like events when the queue is full; startup configuration errors, which exit before the queue exists, are the one synchronous exception.
+- **One line per event, written whole.** Each event is serialised to a single line; over-long events are cut field by field, longest first, and marked truncated, at 16 KB. Because the writer is the only writer, a short write is simply continued from the remaining bytes; atomicity at the platform's `PIPE_BUF` (4096 bytes on Linux, 512 on macOS) isn't relied on. `EAGAIN` (if the descriptor is non-blocking) is retried with exponential backoff from 10 ms to 1 s. `EPIPE` (the reader has gone) isn't retried: the rest of the queue is counted as lost, and the sink is closed.
 - **At startup, fail closed.** If a configured file can't be opened, or the OTEL endpoint isn't a valid URL, the server exits with a configuration error. That matches the existing rule for invalid security configuration: no silent fallback.
-- **At runtime, fail open, visibly.** A failed or dropped write, or an OTLP export the collector rejects or can't receive, never blocks or fails a tool call. Each loss is counted; an `audit.loss` event reports the count once writing works again, and a warning goes to stderr, rate-limited to one per minute. `audit.seq` gaps show the loss in the backend.
+- **At runtime, fail open, visibly.** A failed or dropped write, or an OTLP export the collector rejects or can't receive, never blocks or fails a tool call. Each loss is counted; an `audit.loss` event reports the count once writing works again, and a warning is enqueued for stderr, rate-limited to one per minute. `audit.seq` gaps show the loss in the backend.
 - **An unreachable collector at startup** (2.2.0) is a runtime failure, so it fails open. To make sure users don't believe they have a trail when they don't, the server exports `server.start` immediately and prints a clear warning on stderr if that fails.
 - **OTEL batching** (2.2.0). The SDK's batch log record processor, with a bounded queue (2048 records) and a 1 s schedule.
 - **Shutdown.**
-  - The SDK's stdio transport doesn't listen for stdin `end`, so the server adds a listener. Today, an open instrument socket keeps the process alive after stdin closes. On stdin end, the server closes the instrument connection, flushes, and exits.
+  - The SDK's stdio transport doesn't listen for stdin `end`, so the server adds a listener. Today, an open instrument socket keeps the process alive after stdin closes. On stdin end, the server closes the instrument connection, flushes with the same 2 s limit as below, and exits. The client has usually gone, so stderr may be closed (`EPIPE`, counted as lost) or full.
   - Clients usually stop servers with SIGTERM. A SIGTERM/SIGINT handler replaces Node's default exit, so it flushes (2 s timeout) and then calls `process.exit`.
   - SIGKILL loses whatever is queued, including the final `server.stop`. That's why losses are reported incrementally (`audit.loss`), not only at stop.
-- **Ordering.** JSONL sinks preserve emission order. OTLP batches may arrive out of order; `audit.seq` restores it.
+- **Ordering.** JSONL sinks preserve emission order. OTLP batches may arrive out of order; the sink's `audit.seq` restores it.
 
 ## Integrity
 
 What this design does and doesn't give:
 
 - **Against an honest server with a buggy or misbehaving model:** a complete record, with detectable losses.
-- **Against a compromised server process** (code execution inside it): nothing it produces after the compromise can be trusted. It can rewrite the local file, forge events, stop exporting, and send any command to the instrument without emitting an event, since the hooks run in the same process. It holds the export credentials (`OTEL_EXPORTER_OTLP_HEADERS` is in its environment), so it can even forge a continuous, gap-free `audit.seq` stream under the same `service.instance.id`. Records still in the batch queue (up to about 1 s) can be dropped.
+- **Against a compromised server process** (code execution inside it): nothing it produces after the compromise can be trusted. It can rewrite the local file, forge events, stop exporting, and send any command to the instrument without emitting an event, since the hooks run in the same process. It holds the export credentials (`OTEL_EXPORTER_OTLP_HEADERS` is in its environment), so it can even forge a continuous, gap-free `audit.seq` stream for the OTLP sink under the same `service.instance.id`. Records still in the batch queue (up to about 1 s) can be dropped.
 - **What the OTLP export does give (2.2.0):** events exported *before* the compromise can't be changed by the process. That holds only if the backend is append-only and the configured key can only ingest, not delete or query. The README recommends an ingest-only key.
 - **2.1.0 has no off-machine copy.** Its threat-model row must not claim integrity beyond "a record of an honest server's activity".
 - **Hash-chaining the local file** wouldn't add anything on its own: the same process could rewrite the chain from the start. Out of scope.
@@ -198,14 +199,16 @@ What this design does and doesn't give:
   - schema-invalid arguments, an unknown tool name, a disabled `scpi_command` and a malformed line are recorded;
   - every guard rule produces `guard.refused` with its `rule`, and no `scpi.write`; every listed rule is produced at least once;
   - attribution: two parallel calls, "timeout then the next call" and "idle close after the last call" (see "Attributing instrument traffic");
-  - sds: a setter is a `command` write; a reset during the `*OPC?` gap gives `not_written`;
-  - `audit.seq` has no gaps; strings are bounded; image and binary content isn't logged; the security level emits only the S events.
+  - sds: a setter is a `command` write; a reset during the `*OPC?` gap gives `written` for the setter's id and `not_written` for the `*OPC?` id, and every write id has exactly one result;
+  - high-impact tools are recorded at the security level; strings are bounded; image and binary content isn't logged; the security level emits only the S events.
 - **Writer:**
-  - a stderr pipe nobody reads doesn't stall tool calls: events are dropped and counted, and `audit.loss` reports them once the pipe drains;
+  - a stderr pipe nobody reads doesn't stall tool calls: fill it, cause drops so the loss warning fires, and check that a tool call still completes; `audit.loss` reports the drops once the pipe drains;
+  - `EPIPE` on stderr counts the queue as lost and doesn't retry;
+  - each sink numbers only the events it accepts: with stderr at the security level and the full trail elsewhere, stderr has no gaps;
   - a file sink is created with `0600`;
   - an unwritable path makes the server exit at startup.
 - **Transport contract:** a test pins the three SDK behaviours the hooks rely on (listed under "Why the transport"), so an SDK upgrade that breaks them fails CI.
-- **Process:** stdout carries only JSON-RPC, whichever sinks are configured. Stdin end and SIGTERM both flush and exit, with an open instrument connection too.
+- **Process:** stdout carries only JSON-RPC, whichever sinks are configured. Stdin end and SIGTERM both flush within 2 s and exit, with an open instrument connection too. No `console.error` remains in `src/`.
 - **OTEL (2.2.0):** a local HTTP server stands in for the collector. It checks:
   - the POST to `/v1/logs` and the attribute names;
   - flush on shutdown;
@@ -221,14 +224,14 @@ What this design does and doesn't give:
 
 1. sdg: move the host-policy check into `SiglentConnection.connect` (its own PR, no behaviour change).
 2. Both: add `rule` to `ScpiPolicyError` (no behaviour change). Make the hardware checks drain stderr.
-3. Both, **2.1.0:** the audit core, the non-blocking writer, the stderr and file sinks, the security and full levels, the transport and connection hooks, shutdown handling, and the tests. The threat-model row changes to describe what's recorded, with the integrity limits for a local-only log. The README gets an "Audit log" section.
+3. Both, **2.1.0:** the audit core, the non-blocking writer (also for the human-readable stderr lines), the stderr and file sinks, the security and full levels, the transport and connection hooks, shutdown handling, and the tests. The threat-model row changes to describe what's recorded, with the integrity limits for a local-only log. The README gets an "Audit log" section.
 4. Both, **2.2.0:** the OTLP sink, the startup export check, the README's collector example with an ingest-only key, and the threat-model update for the off-machine copy.
 
 ## Decisions
 
 Proposed after the design review; to be confirmed before implementation.
 
-1. **Default:** on, at the security level, on stderr. The full trail is opt-in with `SIGLENT_AUDIT_LOG`. The writer is non-blocking either way.
+1. **Default:** on, at the security level (including high-impact tool calls), on stderr. The full trail is opt-in with `SIGLENT_AUDIT_LOG`. The writer is non-blocking either way.
 2. **Arguments:** logged, bounded at 512 characters.
 3. **Reply text:** logged, bounded. Binary replies are size only.
 4. **Runtime failures:** fail open, with losses visible while the server runs.
