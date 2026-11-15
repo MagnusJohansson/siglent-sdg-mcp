@@ -130,7 +130,7 @@ Two tests keep the list honest. One checks that every `throw new ScpiPolicyError
 | an absolute path | that file, created with mode `0600`, appended | full |
 | `off` | none | — |
 
-- **The security level** covers `server.start`/`server.stop`, `audit.loss`, `guard.refused`, `instrument.connect`/`disconnect`, and requests and responses for state-changing tools. That's a few lines per configure call and none for reads, and it's what the problem statement asks for: a refusal no longer goes unnoticed. The full trail (every `mcp.*` event and the wire-level `scpi.*` events) is 10 to 20 events per configure call, so it's opt-in.
+- **The security level** covers `server.start`/`server.stop`, `audit.loss`, `guard.refused`, `instrument.connect`/`disconnect`, and requests and responses for state-changing tools. That's a few lines per configure call and none for pure reads (sds's `measure` tools count as state-changing, since they install the measurement on the display), and it's what the problem statement asks for: a refusal no longer goes unnoticed. The full trail (every `mcp.*` event and the wire-level `scpi.*` events) is 10 to 20 events per configure call, so it's opt-in.
 - **OTLP (2.2.0)** is enabled by the standard `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, and always receives the full trail. It's independent of `SIGLENT_AUDIT_LOG`: `off` plus an endpoint means OTLP only. The standard OTEL variables configure it (`OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`, ...), with no server-specific duplicates.
 - **Never stdout.** Stdout carries the MCP protocol. A test starts the server, makes calls that produce every event type, and checks that every line on stdout parses as JSON-RPC.
 
