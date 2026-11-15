@@ -45,6 +45,8 @@ Replace `192.168.1.126` with your generator's IP address.
 
 No Node.js installation required. Works on Linux, macOS, and Windows (via WSL2 or Docker Desktop).
 
+The image runs the server as an unprivileged user (`node`, UID 1000). The extra flags below are optional hardening: `--read-only` makes the container's filesystem read-only (the server writes no files), `--cap-drop=ALL` drops all Linux capabilities, and `--security-opt=no-new-privileges` stops a process from gaining privileges through setuid binaries. The server only needs outbound TCP to the instrument.
+
 ```json
 {
   "mcpServers": {
@@ -53,6 +55,7 @@ No Node.js installation required. Works on Linux, macOS, and Windows (via WSL2 o
       "command": "docker",
       "args": [
         "run", "--rm", "-i",
+        "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
         "-e", "SIGLENT_SDG_IP=192.168.1.126",
         "ghcr.io/magnusjohansson/siglent-sdg-mcp:latest"
       ]
@@ -143,6 +146,7 @@ Edit `claude_desktop_config.json`:
       "command": "docker",
       "args": [
         "run", "--rm", "-i",
+        "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
         "-e", "SIGLENT_SDG_IP=192.168.1.126",
         "ghcr.io/magnusjohansson/siglent-sdg-mcp:latest"
       ]
@@ -187,6 +191,7 @@ You can also add servers through the UI: **Settings > Cursor Settings > MCP > Ad
       "command": "docker",
       "args": [
         "run", "--rm", "-i",
+        "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
         "-e", "SIGLENT_SDG_IP=192.168.1.126",
         "ghcr.io/magnusjohansson/siglent-sdg-mcp:latest"
       ]
@@ -229,6 +234,7 @@ You can also configure servers through the UI: **Cascade panel > MCP icon > Mana
       "command": "docker",
       "args": [
         "run", "--rm", "-i",
+        "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
         "-e", "SIGLENT_SDG_IP=192.168.1.126",
         "ghcr.io/magnusjohansson/siglent-sdg-mcp:latest"
       ]
@@ -273,6 +279,7 @@ Configuration is managed through the IDE's UI:
       "command": "docker",
       "args": [
         "run", "--rm", "-i",
+        "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
         "-e", "SIGLENT_SDG_IP=192.168.1.126",
         "ghcr.io/magnusjohansson/siglent-sdg-mcp:latest"
       ]
@@ -382,6 +389,7 @@ What the server enforces, regardless of what the model was told:
 | **`scpi_query` is query-only**: a single header ending in `?`; parameters after `?` only for queries documented to take them (`STL?`, `MMEMory:CATalog?`), and only in their documented forms; common commands only as pure queries (`*IDN?`, `*OPC?`, ...); action commands the programming guide documents without a query form are rejected in `?` form | Using the "read-only" tool to change state (`scpi_query("C1:OUTP ON")`, `"C1:BSWV? AMP,10"`, `"*RST?"`, `"C1:TRIGger?"`) |
 | **Raw `scpi_command` is off by default**, and can only be enabled together with named instrument hosts (`*` is not accepted) | An unrestricted command channel to the instrument, or to other SCPI devices on the LAN (power supplies often use port 5025 too) |
 | **Connect allowlist**: `connect` only reaches `SIGLENT_SDG_IP`, `SIGLENT_ALLOWED_HOSTS`, or (if neither is set) private-LAN IP addresses, and only the instrument port | Using the server as a TCP client to reach other services, e.g. `169.254.169.254` |
+| **The Docker image runs unprivileged**: as `node` (UID 1000), with the app files owned by root. The documented `docker run` adds `--read-only --cap-drop=ALL --security-opt=no-new-privileges`, and every release checks that the image starts that way | A compromised server process modifying its own code, or using root inside the container as a step towards the host |
 **What it does not protect against:**
 
 - **Output voltage.** This server does **not** limit amplitude or offset. The model can set anything the generator allows, up to 20 Vpp. To protect a circuit, set the generator's own limit on the front panel or with `C1:BSWV MAX_OUTPUT_AMP,<Vpp>` (on models that support it). **This backstop only holds while raw SCPI is off**: with `SIGLENT_ALLOW_RAW_SCPI=true`, the model can send `MAX_OUTPUT_AMP` itself and raise the limit. Whether `reset` (`*RST`) restores the generator's default limit isn't documented; check it on your model before relying on the backstop. Server-side limits are being designed separately: a first version was reviewed and found to be bypassable, so it isn't shipped (see the threat model).
@@ -447,6 +455,7 @@ Then use the local image in your `.mcp.json`:
       "command": "docker",
       "args": [
         "run", "--rm", "-i",
+        "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
         "-e", "SIGLENT_SDG_IP=192.168.1.126",
         "siglent-sdg-mcp"
       ]
@@ -508,7 +517,7 @@ By default, Docker containers can reach LAN devices via the bridge network (NAT)
 - Verify the generator is reachable from your host: `telnet 192.168.1.126 5025`
 - On Linux, try adding `--network host` to the Docker args:
   ```json
-  "args": ["run", "--rm", "-i", "--network", "host", "-e", "SIGLENT_SDG_IP=192.168.1.126", "ghcr.io/magnusjohansson/siglent-sdg-mcp:latest"]
+  "args": ["run", "--rm", "-i", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--network", "host", "-e", "SIGLENT_SDG_IP=192.168.1.126", "ghcr.io/magnusjohansson/siglent-sdg-mcp:latest"]
   ```
   Note: `--network host` does not work on macOS or Windows Docker Desktop.
 
