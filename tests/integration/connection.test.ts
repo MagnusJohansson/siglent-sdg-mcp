@@ -3,7 +3,8 @@
  */
 import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
 import { SdgSimulator, SIM_IDN } from "../simulator/sdg-simulator.js";
-import { connection, SiglentConnection } from "../../src/connection.js";
+import { connection, DEFAULT_OPTIONS, SiglentConnection } from "../../src/connection.js";
+import { assertConnectAllowed } from "../../src/security/host-policy.js";
 import { ScpiPolicyError } from "../../src/security/scpi-guard.js";
 
 let sim: SdgSimulator;
@@ -100,5 +101,8 @@ describe("host policy in connect()", () => {
     await expect(conn.connect("127.0.0.1", port)).rejects.toThrow(ScpiPolicyError);
     await expect(conn.connect("127.0.0.1", 5025)).rejects.toThrow(ScpiPolicyError);
     await expect(conn.connect("192.168.1.186", port)).rejects.toThrow(ScpiPolicyError);
+    // The allowing half: a private-LAN address on 5025 passes the default policy.
+    expect(() => assertConnectAllowed("192.168.1.186", 5025, DEFAULT_OPTIONS.hostPolicy)).not.toThrow();
+    expect(() => assertConnectAllowed("10.0.0.5", 5025, DEFAULT_OPTIONS.hostPolicy)).not.toThrow();
   });
 });

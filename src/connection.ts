@@ -12,7 +12,7 @@ export interface ConnectionOptions {
   defaultPort: number;
 }
 
-const DEFAULT_OPTIONS: ConnectionOptions = {
+export const DEFAULT_OPTIONS: ConnectionOptions = {
   // Until configured: private-LAN IP addresses on the standard port only.
   hostPolicy: { allowedHosts: [], allowedPorts: [DEFAULT_PORT] },
   defaultPort: DEFAULT_PORT,

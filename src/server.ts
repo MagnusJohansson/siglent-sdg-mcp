@@ -16,7 +16,9 @@ export const SERVER_VERSION = "2.0.7";
 /** Build the MCP server with all tools registered under the given configuration. */
 export function createServer(config: ServerConfig): McpServer {
   // The connection enforces the host policy on every connect path
-  // (the connect tool and auto-connect).
+  // (the connect tool and auto-connect). It's one process-wide connection,
+  // so this configures it for every server in the process: one server per
+  // process, or the last one created sets the policy for all of them.
   connection.configure({ hostPolicy: config.hostPolicy, defaultPort: config.defaultPort });
 
   const server = new McpServer({
