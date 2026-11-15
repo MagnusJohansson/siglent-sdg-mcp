@@ -2,7 +2,6 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { connection } from "../connection.js";
 import type { ServerConfig } from "../config.js";
-import { assertConnectAllowed } from "../security/host-policy.js";
 
 export function registerConnectionTools(server: McpServer, config: ServerConfig): void {
   server.tool(
@@ -37,7 +36,6 @@ export function registerConnectionTools(server: McpServer, config: ServerConfig)
       }
 
       try {
-        assertConnectAllowed(targetHost, targetPort, config.hostPolicy);
         const idn = await connection.connect(targetHost, targetPort);
         return {
           content: [
