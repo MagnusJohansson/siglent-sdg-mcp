@@ -229,7 +229,7 @@ What this design does and doesn't give:
 
 ## Decisions
 
-Proposed after the design review; to be confirmed before implementation.
+Proposed after the design reviews and confirmed by the maintainer on 15 Nov 2026.
 
 1. **Default:** on, at the security level (including state-changing tool calls), on stderr. The full trail is opt-in with `SIGLENT_AUDIT_LOG`. The writer is non-blocking either way.
 2. **Arguments:** logged, bounded at 512 characters.
