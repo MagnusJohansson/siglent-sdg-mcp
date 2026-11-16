@@ -119,6 +119,7 @@ Replace `/path/to/siglent-sdg-mcp` with the actual path to your clone.
 | `SIGLENT_PORT` | No | `5025` | Fallback if `SIGLENT_SDG_PORT` is not set |
 | `SIGLENT_ALLOWED_HOSTS` | No | — | Comma-separated hosts the `connect` tool may use, in addition to `SIGLENT_SDG_IP`. `*` allows any host (not recommended). See [Security](#security) |
 | `SIGLENT_ALLOW_RAW_SCPI` | No | `false` | Register the raw `scpi_command` tool. Requires `SIGLENT_SDG_IP` or `SIGLENT_ALLOWED_HOSTS` naming specific hosts (`*` is not accepted) |
+| `SIGLENT_AUDIT_OTLP` | No | — | `1` to export the audit log to the collector in `OTEL_EXPORTER_OTLP_ENDPOINT`. Not needed with `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`. See [Exporting to OpenTelemetry](#exporting-to-opentelemetry) |
 | `SIGLENT_AUDIT_LOG` | No | security events on stderr | `stderr` for the full audit trail on stderr, an absolute file path for the full trail in that file, or `off`. See [Audit log](#audit-log) |
 
 ### Auto-Connect Behavior
@@ -424,17 +425,18 @@ A refused query looks like this (shortened):
 
 ### Exporting to OpenTelemetry
 
-Set the standard OpenTelemetry variables and the server also exports the full trail as OTLP log records, over HTTP with JSON payloads, to a collector or any backend that accepts OTLP:
+The server can also export the full trail as OTLP log records, over HTTP with JSON payloads, to a collector or any backend that accepts OTLP. It's opt-in: set `SIGLENT_AUDIT_OTLP=1` together with the standard endpoint, or use the logs-specific `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, which is the opt-in on its own:
 
 ```json
 "env": {
   "SIGLENT_SDG_IP": "192.168.1.126",
+  "SIGLENT_AUDIT_OTLP": "1",
   "OTEL_EXPORTER_OTLP_ENDPOINT": "https://otlp.example.com:4318",
   "OTEL_EXPORTER_OTLP_HEADERS": "authorization=Bearer <ingest-only key>"
 }
 ```
 
-- **The generic `OTEL_EXPORTER_OTLP_ENDPOINT` switches the export on**, including when it's inherited from the environment (a shell or an MCP client set up for another application's telemetry), and then tool arguments and the instrument's `*IDN?` reply go to that collector. Set `OTEL_LOGS_EXPORTER=none` (or `OTEL_SDK_DISABLED=true`) in this server's `env` to keep it off. `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` is used as-is; the generic endpoint gets `/v1/logs` appended, and the server logs the URL it posts to.
+- **Why the opt-in:** the generic `OTEL_EXPORTER_OTLP_ENDPOINT` is often inherited from an environment set up for another application's telemetry, and the audit trail carries tool arguments and the instrument's serial number. On its own it only gets a startup note. `OTEL_LOGS_EXPORTER=none` or `OTEL_SDK_DISABLED=true` keeps the export off in any case. `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` is used as-is; the generic endpoint gets `/v1/logs` appended, and the server logs the URL it posts to.
 - The export is independent of `SIGLENT_AUDIT_LOG`: with `SIGLENT_AUDIT_LOG=off` it's the only copy. `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` work as usual, except that `service.instance.id` stays the server's own, so exported records join the local ones. Other protocols (`grpc`, `http/protobuf`) and other `OTEL_LOGS_EXPORTER` values aren't supported; the server says so at startup.
 - Each record's event name is `siglent.audit.<event>` (for example `siglent.audit.guard.refused`), refusals and failures are `WARN`, and the fields above are attributes. Attribute names follow the OpenTelemetry conventions where one exists (`gen_ai.tool.name`, `mcp.method.name`, `server.address`); the MCP conventions are still at Development status, so a name may change, and the CHANGELOG will say so.
 - **An invalid endpoint stops the server at startup.** An unreachable or failing collector doesn't: tool calls carry on, and the server warns on stderr (once, then at most once a minute). Records a failed export didn't deliver, and records a collector rejects in a "partial success" answer, are counted and reported with `audit.loss` once the export works again. Records still waiting at shutdown are reported on the other sinks: `server.stop` carries `otlp.unexported`, and stderr says how many weren't exported.

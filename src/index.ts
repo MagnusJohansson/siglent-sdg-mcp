@@ -87,7 +87,7 @@ if (otlp && config.otlp) {
   const sink = otlp;
   const endpoint = config.otlp.endpoint;
   void sink.flush(10_000).then(() => {
-    if (sink.status.delivered === 0) {
+    if (sink.delivered === 0) {
       const why = sink.status.lastError
         ? sink.status.lastError
         : sink.status.rejected > 0

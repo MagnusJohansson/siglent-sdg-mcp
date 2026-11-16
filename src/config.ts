@@ -31,10 +31,16 @@ export interface OtlpConfig {
 }
 
 /**
- * The OTLP export is enabled by the standard variables, which the exporter
- * itself reads (endpoint, headers, timeout). Here only the endpoint is checked
- * (an invalid URL is a configuration error) and the protocol: this server
+ * The exporter reads the standard variables itself (endpoint, headers,
+ * timeout). Here the server decides whether to export at all, checks the
+ * endpoint (an invalid URL is a configuration error) and the protocol: it
  * sends OTLP/HTTP with JSON payloads.
+ *
+ * Opt-in: the generic OTEL_EXPORTER_OTLP_ENDPOINT is often inherited from an
+ * environment set up for another application's telemetry, and the audit
+ * trail carries tool arguments and the instrument's serial number. So the
+ * export needs SIGLENT_AUDIT_OTLP=1, or the logs-specific
+ * OTEL_EXPORTER_OTLP_LOGS_ENDPOINT; the generic endpoint alone gets a note.
  */
 function parseOtlp(env: NodeJS.ProcessEnv, notes: string[]): OtlpConfig | undefined {
   if ((env.OTEL_SDK_DISABLED ?? "").trim().toLowerCase() === "true") return undefined;
@@ -56,6 +62,13 @@ function parseOtlp(env: NodeJS.ProcessEnv, notes: string[]): OtlpConfig | undefi
       ? "OTEL_EXPORTER_OTLP_ENDPOINT"
       : undefined;
   if (!name) return undefined;
+  if (name === "OTEL_EXPORTER_OTLP_ENDPOINT" && !isTrue(env.SIGLENT_AUDIT_OTLP)) {
+    notes.push(
+      "OTEL_EXPORTER_OTLP_ENDPOINT is set, but the audit log isn't exported: set SIGLENT_AUDIT_OTLP=1 " +
+        "(or OTEL_EXPORTER_OTLP_LOGS_ENDPOINT) to export it."
+    );
+    return undefined;
+  }
   let url: URL;
   try {
     url = new URL(env[name]!.trim());

@@ -31,7 +31,7 @@ function value(v: Record<string, unknown>): unknown {
 async function collector() {
   const records: Received[] = [];
   const headers: string[] = [];
-  const state = { fail: 0, failBody: "{}", rejected: 0 };
+  const state = { fail: 0, failBody: "{}", rejected: 0, rejectAll: false };
   const server = http.createServer((req, res) => {
     let body = "";
     req.on("data", (c: Buffer) => (body += c.toString()));
@@ -63,9 +63,14 @@ async function collector() {
           }
         }
       }
+      const inRequest = msg.resourceLogs.reduce(
+        (n, rl) => n + rl.scopeLogs.reduce((m, sl) => m + sl.logRecords.length, 0),
+        0
+      );
+      const rejected = state.rejectAll ? inRequest : state.rejected;
       res
         .writeHead(200, { "content-type": "application/json" })
-        .end(state.rejected ? JSON.stringify({ partialSuccess: { rejectedLogRecords: state.rejected } }) : "{}");
+        .end(rejected ? JSON.stringify({ partialSuccess: { rejectedLogRecords: rejected } }) : "{}");
     });
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
@@ -75,7 +80,13 @@ async function collector() {
 
 function start(env: Record<string, string>) {
   const child = spawn(process.execPath, [SERVER], {
-    env: { PATH: process.env.PATH ?? "", SIGLENT_SDG_IP: "127.0.0.1", SIGLENT_SDG_PORT: String(simPort), ...env },
+    env: {
+      PATH: process.env.PATH ?? "",
+      SIGLENT_SDG_IP: "127.0.0.1",
+      SIGLENT_SDG_PORT: String(simPort),
+      SIGLENT_AUDIT_OTLP: "1",
+      ...env,
+    },
   }) as ChildProcessWithoutNullStreams;
   const replies = new Map<number, Record<string, unknown>>();
   let buf = "";
@@ -316,6 +327,49 @@ describe("OTLP export", () => {
         "service.name": "bench-sdg",
         "deployment.environment": "bench",
       });
+    } finally {
+      await col.close();
+    }
+  }, 60_000);
+
+  it("warns at startup when the collector rejects every record", async () => {
+    const col = await collector();
+    col.state.rejectAll = true; // a partial-success answer rejecting the whole request
+    try {
+      const s = start({ OTEL_EXPORTER_OTLP_ENDPOINT: col.url, SIGLENT_AUDIT_LOG: "off" });
+      await s.init();
+      await until(() => s.stderr().includes("the OTLP export to"), 15_000);
+      expect(s.stderr()).toMatch(/isn't working \(the collector rejected every record\)/);
+      s.stop();
+      await s.closed;
+    } finally {
+      await col.close();
+    }
+  }, 60_000);
+
+  it("doesn't export on an inherited generic endpoint without the opt-in", async () => {
+    const col = await collector();
+    try {
+      const s = start({ OTEL_EXPORTER_OTLP_ENDPOINT: col.url, SIGLENT_AUDIT_OTLP: "" });
+      await s.init();
+      await s.call("scpi_query", { command: "C1:OUTP ON" });
+      s.stop();
+      await s.closed;
+      expect(col.records).toEqual([]);
+      expect(s.stderr()).toMatch(/isn't exported: set SIGLENT_AUDIT_OTLP=1/);
+    } finally {
+      await col.close();
+    }
+  }, 60_000);
+
+  it("exports with the logs-specific endpoint alone", async () => {
+    const col = await collector();
+    try {
+      const s = start({ OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: `${col.url}/v1/logs`, SIGLENT_AUDIT_OTLP: "" });
+      await s.init();
+      s.stop();
+      await s.closed;
+      expect(col.records.map((r) => r.eventName)).toContain("siglent.audit.server.stop");
     } finally {
       await col.close();
     }

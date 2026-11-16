@@ -55,8 +55,8 @@ function summary(r: AuditRecord): string {
 export interface OtlpSinkStatus {
   exportsOk: number;
   exportsFailed: number;
-  /** Records the collector accepted: exported successfully and not rejected. */
-  delivered: number;
+  /** Records in exports that succeeded, rejected ones included. */
+  exportedRecords: number;
   /** Records rejected in partial-success answers. */
   rejected: number;
   lastError?: string;
@@ -76,7 +76,16 @@ export class OtlpSink implements AuditSink {
   private settled = 0;
   private lostLater = 0;
   private flushChain: Promise<void> = Promise.resolve();
-  readonly status: OtlpSinkStatus = { exportsOk: 0, exportsFailed: 0, delivered: 0, rejected: 0 };
+  readonly status: OtlpSinkStatus = { exportsOk: 0, exportsFailed: 0, exportedRecords: 0, rejected: 0 };
+
+  /**
+   * Records the collector actually kept. Computed when read: the SDK reports
+   * a partial-success rejection before it reports the export's success, so a
+   * running total would depend on that order.
+   */
+  get delivered(): number {
+    return Math.max(0, this.status.exportedRecords - this.status.rejected);
+  }
   private sdk?: Sdk;
 
   /** Called by the exporter wrapper when an export finishes (exactly once per export). */
@@ -84,7 +93,7 @@ export class OtlpSink implements AuditSink {
     this.settled += count;
     if (ok) {
       this.status.exportsOk++;
-      this.status.delivered += count;
+      this.status.exportedRecords += count;
     } else {
       this.status.exportsFailed++;
       this.status.lastError = error;
@@ -96,7 +105,6 @@ export class OtlpSink implements AuditSink {
   onRejected(count: number): void {
     if (!(count > 0)) return;
     this.status.rejected += count;
-    this.status.delivered = Math.max(0, this.status.delivered - count);
     this.lostLater += count;
   }
 
