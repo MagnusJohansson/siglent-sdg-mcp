@@ -82,7 +82,14 @@ function auditLines(text: string): Array<Record<string, unknown>> {
  * isn't enough; the instrument.connect event is (it's a security-level event).
  */
 async function waitConnected(s: ReturnType<typeof start>, auditFile?: string) {
-  const text = () => (auditFile ? (existsSync(auditFile) ? readFileSync(auditFile, "utf8") : "") : s.stderr());
+  const read = (file: string) => {
+    try {
+      return readFileSync(file, "utf8");
+    } catch {
+      return ""; // not created yet
+    }
+  };
+  const text = () => (auditFile ? read(auditFile) : s.stderr());
   for (let t = 0; t < 200; t++) {
     if (text().includes('"event.name":"instrument.connect"')) return;
     await new Promise((res) => setTimeout(res, 25));

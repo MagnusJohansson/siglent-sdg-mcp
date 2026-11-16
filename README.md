@@ -422,7 +422,7 @@ A refused query looks like this (shortened):
 - **What's logged:** tool arguments and the generator's text replies, each cut at 512 characters. Tool results are summarised as types and sizes, not copied. The instrument's `*IDN?` reply includes its serial number. Nothing from the environment is logged beyond the effective configuration.
 - **What it can't do:** the log records an honest server's activity. A compromised server process could rewrite the file, forge events or send commands without logging them; the log lives on the same machine, under the same user. There's no caller identity in stdio mode: the client's name is recorded as self-reported. Shipping the log off the machine over OpenTelemetry is planned; see [docs/audit-log-design.md](docs/audit-log-design.md).
 
-**Docker:** stderr works unchanged with `--read-only`. A file needs a mounted directory that UID 1000 can write: add `"-v", "/host/audit:/audit", "-e", "SIGLENT_AUDIT_LOG=/audit/sdg.jsonl"` to the `docker run` arguments.
+**Docker:** stderr works unchanged with `--read-only`. A file needs a mounted directory that UID 1000 can write: add `"-v", "/host/audit:/audit", "-e", "SIGLENT_AUDIT_LOG=/audit/sdg.jsonl"` to the `docker run` arguments. On Linux the file then belongs to UID 1000 with mode `0600`, so only that user (or root) can read it on the host; add `"--user", "<your uid>:<your gid>"` to run the server as your own user instead (still not root). Docker Desktop on macOS and Windows maps ownership to your user.
 
 ## Architecture
 

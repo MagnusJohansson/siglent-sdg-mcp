@@ -31,7 +31,8 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { fileURLToPath } from "node:url";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { chmodSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -244,16 +245,35 @@ async function main() {
   const refusedQueries = new Set(attacks.filter(([, tool]) => tool === "scpi_query").map(([, , args]) => args.command));
   const leaked = writes.filter((w) => refusedQueries.has(w) || w.includes("FRQ,1234"));
   check("no probe's payload reached the wire", writes.length > 0 && leaked.length === 0, `${writes.length} writes${leaked.length ? `, leaked: ${leaked.join(", ")}` : ""}`);
+  if (dockerImage) {
+    // The container's files belong to UID 1000; remove them through the image.
+    execFileSync("docker", ["run", "--rm", "--user", "0", "-v", `${auditDir}:/audit`, "--entrypoint", "sh", dockerImage, "-c", "rm -rf /audit/*"], { stdio: "ignore" });
+  }
   rmSync(auditDir, { recursive: true, force: true });
 
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }
 
+/**
+ * The audit file's text. With --docker it belongs to the container's UID 1000
+ * with mode 0600, which a different host user can't read on Linux, so it's
+ * read through the image as that user.
+ */
+function auditText() {
+  try {
+    return dockerImage
+      ? execFileSync("docker", ["run", "--rm", "-v", `${auditDir}:/audit`, "--entrypoint", "cat", dockerImage, "/audit/audit.jsonl"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
+      : readFileSync(auditFile, "utf8");
+  } catch {
+    return ""; // not written yet
+  }
+}
+
 /** The audit file, once the server has written its server.stop (it flushes on shutdown). */
 async function readAudit() {
   for (let t = 0; t < 100; t++) {
-    const text = existsSync(auditFile) ? readFileSync(auditFile, "utf8") : "";
+    const text = auditText();
     if (text.includes('"event.name":"server.stop"')) {
       return text.split("\n").filter((l) => l.startsWith("{")).map((l) => JSON.parse(l));
     }
