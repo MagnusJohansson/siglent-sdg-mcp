@@ -45,7 +45,7 @@ Replace `192.168.1.126` with your generator's IP address.
 
 No Node.js installation required. Works on Linux, macOS, and Windows (via WSL2 or Docker Desktop).
 
-The image runs the server as an unprivileged user (`node`, UID 1000) and contains no setuid or setgid binaries. The extra flags below are optional hardening: `--read-only` makes the container's filesystem read-only (the server writes no files), `--cap-drop=ALL` drops all Linux capabilities, and `--security-opt=no-new-privileges` stops a process from gaining privileges through setuid binaries. The server only needs outbound TCP to the instrument.
+The image runs the server as an unprivileged user (`node`, UID 1000) and contains no setuid or setgid binaries. The extra flags below are optional hardening: `--read-only` makes the container's filesystem read-only (the server writes no files unless a [file audit log](#audit-log) is configured, which needs a mounted directory), `--cap-drop=ALL` drops all Linux capabilities, and `--security-opt=no-new-privileges` stops a process from gaining privileges through setuid binaries. The server only needs outbound TCP to the instrument.
 
 ```json
 {
@@ -119,6 +119,7 @@ Replace `/path/to/siglent-sdg-mcp` with the actual path to your clone.
 | `SIGLENT_PORT` | No | `5025` | Fallback if `SIGLENT_SDG_PORT` is not set |
 | `SIGLENT_ALLOWED_HOSTS` | No | — | Comma-separated hosts the `connect` tool may use, in addition to `SIGLENT_SDG_IP`. `*` allows any host (not recommended). See [Security](#security) |
 | `SIGLENT_ALLOW_RAW_SCPI` | No | `false` | Register the raw `scpi_command` tool. Requires `SIGLENT_SDG_IP` or `SIGLENT_ALLOWED_HOSTS` naming specific hosts (`*` is not accepted) |
+| `SIGLENT_AUDIT_LOG` | No | security events on stderr | `stderr` for the full audit trail on stderr, an absolute file path for the full trail in that file, or `off`. See [Audit log](#audit-log) |
 
 ### Auto-Connect Behavior
 
@@ -389,6 +390,7 @@ What the server enforces, regardless of what the model was told:
 | **`scpi_query` is query-only**: a single header ending in `?`; parameters after `?` only for queries documented to take them (`STL?`, `MMEMory:CATalog?`), and only in their documented forms; common commands only as pure queries (`*IDN?`, `*OPC?`, ...); action commands the programming guide documents without a query form are rejected in `?` form | Using the "read-only" tool to change state (`scpi_query("C1:OUTP ON")`, `"C1:BSWV? AMP,10"`, `"*RST?"`, `"C1:TRIGger?"`) |
 | **Raw `scpi_command` is off by default**, and can only be enabled together with named instrument hosts (`*` is not accepted) | An unrestricted command channel to the instrument, or to other SCPI devices on the LAN (power supplies often use port 5025 too) |
 | **Connect allowlist**: connections only reach `SIGLENT_SDG_IP`, `SIGLENT_ALLOWED_HOSTS`, or (if neither is set) private-LAN IP addresses, and only the instrument port. Enforced in the connection itself, so it covers the `connect` tool and auto-connect alike | Using the server as a TCP client to reach other services, e.g. `169.254.169.254` |
+| **Audit log**: every refusal, with the rule that refused it, every connect and disconnect, and every state-changing tool call, as JSON lines on stderr by default; optionally the full trail, including every line written to the instrument. See [Audit log](#audit-log) | A refused prompt-injection attempt going unnoticed; no record of what reached the instrument |
 | **The Docker image runs unprivileged**: as `node` (UID 1000), with the app files owned by root and no setuid or setgid binaries. The documented `docker run` adds `--read-only --cap-drop=ALL --security-opt=no-new-privileges`. Before publishing, every release checks that the image built from the release commit doesn't run as root, has no setuid or setgid binaries, and starts with those flags | A compromised server process modifying its own code, or using root inside the container as a step towards the host |
 **What it does not protect against:**
 
@@ -396,6 +398,31 @@ What the server enforces, regardless of what the model was told:
 - **Other clients on port 5025.** Anyone with network access to the instrument can control it directly, without going through this server. The instrument has no authentication. Network segmentation is the control for that.
 
 The full threat model, including residual risks, is in [docs/threat-model.md](docs/threat-model.md).
+
+## Audit log
+
+The server records what it refused, what it connected to and, optionally, every line it wrote to the generator, as one JSON object per line. Without configuration, the security events go to stderr, which MCP clients usually capture in their own logs.
+
+| `SIGLENT_AUDIT_LOG` | Where | What |
+|---|---|---|
+| not set | stderr | Security events: refusals (`guard.refused`), `instrument.connect`/`disconnect`, state-changing tool calls with their arguments and results, `server.start`/`stop`, and `audit.loss` |
+| `stderr` | stderr | The full trail: also every MCP message, read-only tool calls, and every line written to the instrument with its reply (`scpi.write`, `scpi.result`) |
+| `/absolute/path.jsonl` | that file, appended, created with mode `0600` | The full trail |
+| `off` | nowhere | Nothing |
+
+A refused query looks like this (shortened):
+
+```json
+{"time":"2026-11-16T09:12:03.412Z","event.name":"guard.refused","jsonrpc.request.id":"7","guard":"query","rule":"query.not_a_query","scpi.command":"C1:OUTP ON","audit.sink":"stderr","audit.seq":12}
+```
+
+- **Every event carries the JSON-RPC request id** of the call that caused it, so a refusal, the tool call and every instrument write it led to can be joined. Events no call caused (auto-connect, the instrument closing the socket, shutdown) say so in `cause`.
+- **Refusals have stable rule ids** (`query.not_a_query`, `wire.compound`, `schema.invalid`, `raw.disabled`, `host.not_allowed`, ...), so they can be counted and alerted on without parsing messages.
+- **Losses are visible.** Each sink numbers its records (`audit.seq`) without gaps; a missing number is a lost record, and an `audit.loss` event reports the count once the sink accepts records again. The server never waits for the log: if stderr is a pipe nobody reads, records are dropped and counted, and tool calls carry on. If a write is stuck in the kernel at shutdown (a file on a hung network filesystem), the server ends itself with SIGKILL after about 2 s rather than hanging; that shows as status 137, without a final `server.stop`.
+- **What's logged:** tool arguments and the generator's text replies, each cut at 512 characters. Tool results are summarised as types and sizes, not copied. The instrument's `*IDN?` reply includes its serial number. Nothing from the environment is logged beyond the effective configuration.
+- **What it can't do:** the log records an honest server's activity. A compromised server process could rewrite the file, forge events or send commands without logging them; the log lives on the same machine, under the same user. There's no caller identity in stdio mode: the client's name is recorded as self-reported. Shipping the log off the machine over OpenTelemetry is planned; see [docs/audit-log-design.md](docs/audit-log-design.md).
+
+**Docker:** stderr works unchanged with `--read-only`. A file needs a mounted directory that UID 1000 can write: add `"-v", "/host/audit:/audit", "-e", "SIGLENT_AUDIT_LOG=/audit/sdg.jsonl"` to the `docker run` arguments. On Linux the file then belongs to UID 1000 with mode `0600`, so only that user (or root) can read it on the host; add `"--user", "<your uid>:<your gid>"` to run the server as your own user instead (still not root). Docker Desktop on macOS and Windows maps ownership to your user.
 
 ## Architecture
 
@@ -407,7 +434,8 @@ Claude Code <-- stdio/JSON-RPC --> siglent-sdg-mcp <-- TCP/SCPI --> Generator:50
 - **Protocol:** SCPI commands over raw TCP sockets, newline-terminated
 - **Query Queue:** All SCPI queries are serialized through an internal queue. The generator processes one command at a time, so even when tools issue parallel requests, the queue ensures they're sent sequentially.
 - **Auto-Connect:** If `SIGLENT_SDG_IP` is set, connects in the background on startup without blocking the MCP server.
-- **Security choke point:** every command and query passes through `connection.ts`, which applies the checks in `src/security/` before anything is written to the socket.
+- **Security choke point:** every command and query passes through `connection.ts`, which applies the checks in `src/security/` before anything is written to the socket, and records refusals and writes in the audit log.
+- **Audit log:** `src/audit/` hooks the MCP transport (every message, before the SDK validates it) and the connection, and writes JSON lines through a non-blocking writer. All stderr output goes through that writer, so a stuck stderr can't stall the server.
 
 ## Development
 
@@ -473,8 +501,13 @@ src/
   config.ts             # Environment parsing, effective security settings
   connection.ts         # TCP socket manager with query queue (security choke point)
   security/
-    scpi-guard.ts       # Command-boundary and query-only checks
+    scpi-guard.ts       # Command-boundary and query-only checks, rule ids
     host-policy.ts      # Connect-target allowlist
+  audit/
+    audit.ts            # Audit events, levels, sinks, loss reporting
+    transport.ts        # Hooks on the MCP transport
+    writer.ts           # Non-blocking writer for stderr and files
+    bounds.ts           # Size limits for logged content
   tools/
     connection.ts       # connect, disconnect, identify
     output.ts           # get_output, configure_output
@@ -487,7 +520,7 @@ src/
     scpi.ts             # scpi_query, scpi_command (opt-in)
 tests/
   unit/                 # Guard, host policy and config tests
-  integration/          # End-to-end security tests via MCP client
+  integration/          # End-to-end security and audit tests via MCP client and server processes
   simulator/            # SCPI simulator (TCP)
 ```
 

@@ -1,6 +1,14 @@
 import * as net from "node:net";
+import {
+  audit,
+  auditContext,
+  type AuditContext,
+  type DisconnectReason,
+  type Guard,
+  type ScpiOutcome,
+} from "./audit/audit.js";
 import { assertConnectAllowed, type HostPolicy } from "./security/host-policy.js";
-import { assertIsQuery, assertWireSafe } from "./security/scpi-guard.js";
+import { assertIsQuery, assertWireSafe, ScpiPolicyError } from "./security/scpi-guard.js";
 
 const DEFAULT_PORT = 5025;
 const DEFAULT_TIMEOUT = 5000;
@@ -24,6 +32,21 @@ interface QueuedQuery {
   timeout: number;
   resolve: (value: Buffer) => void;
   reject: (reason: Error) => void;
+  /** Captured at enqueue: the drain runs later, often from another call's socket callback. */
+  ctx: AuditContext;
+  /** Allocated at enqueue, so a query that's never written still has one result. */
+  writeId: number;
+  written: boolean;
+  startedAt?: number;
+}
+
+/** An error that carries the scpi.result outcome it stands for. */
+function outcomeError(message: string, outcome: ScpiOutcome): Error {
+  return Object.assign(new Error(message), { auditOutcome: outcome });
+}
+
+function guardOf(rule: string): Guard {
+  return rule.startsWith("wire.") ? "wire" : rule.startsWith("host.") ? "host" : "query";
 }
 
 export class SiglentConnection {
@@ -46,6 +69,8 @@ export class SiglentConnection {
    */
   private connectGeneration = 0;
   private options: ConnectionOptions;
+  /** The last socket error, for the reason recorded when the socket closes. */
+  private lastSocketError: string | null = null;
 
   constructor(options: Partial<ConnectionOptions> = {}) {
     this.options = { ...DEFAULT_OPTIONS, ...options };
@@ -57,21 +82,45 @@ export class SiglentConnection {
   }
 
   async connect(host: string, port: number = this.options.defaultPort): Promise<string> {
+    const ctx = auditContext();
     // Every connect path (the connect tool, auto-connect) passes through here.
     // Checked first: a refused target must not supersede an attempt in
     // progress or drop the current connection.
-    assertConnectAllowed(host, port, this.options.hostPolicy);
+    try {
+      assertConnectAllowed(host, port, this.options.hostPolicy);
+    } catch (err) {
+      if (err instanceof ScpiPolicyError) {
+        audit.guardRefused({ guard: "host", rule: err.rule, message: err.message, host, port }, ctx);
+        audit.instrumentConnect({ host, port, outcome: "refused_by_policy", message: err.message }, ctx);
+      }
+      throw err;
+    }
 
     const generation = ++this.connectGeneration;
     const superseded = () => generation !== this.connectGeneration;
 
     if (this.socket) {
-      this.disconnect();
+      this.disconnect("replaced", ctx);
     }
 
     this.host = host;
     this.port = port;
 
+    const attempt = this.openSocket(host, port, ctx, superseded);
+    return attempt.then(
+      (idn) => {
+        audit.instrumentConnect({ host, port, outcome: "connected", idn }, ctx);
+        return idn;
+      },
+      (err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        audit.instrumentConnect({ host, port, outcome: superseded() ? "superseded" : "failed", message }, ctx);
+        throw err;
+      }
+    );
+  }
+
+  private openSocket(host: string, port: number, ctx: AuditContext, superseded: () => boolean): Promise<string> {
     return new Promise((resolve, reject) => {
       const socket = new net.Socket();
 
@@ -99,7 +148,7 @@ export class SiglentConnection {
 
           // Try to set CHDR OFF for clean responses (not all SDG models support it)
           try {
-            await this.sendCommand("CHDR OFF");
+            await this.sendCommandIn("CHDR OFF", ctx);
             await this.delay(100);
           } catch {
             // Some models don't support CHDR — that's OK
@@ -107,13 +156,13 @@ export class SiglentConnection {
           if (superseded()) throw new Error("superseded by a newer connect");
 
           // Query identification
-          const idn = await this.query("*IDN?");
+          const idn = await this.queryIn("*IDN?", DEFAULT_TIMEOUT, ctx);
           if (superseded()) throw new Error("superseded by a newer connect");
           resolve(idn);
         } catch (err) {
           // Only the current attempt may tear down the shared connection;
           // a superseded one would otherwise kill the newer socket.
-          if (!superseded()) this.disconnect();
+          if (!superseded()) this.disconnect("init_failed", ctx);
           reject(
             new Error(
               `Connected but failed to initialize: ${err instanceof Error ? err.message : String(err)}`
@@ -131,7 +180,10 @@ export class SiglentConnection {
     });
   }
 
-  disconnect(): void {
+  disconnect(reason: DisconnectReason = "requested", ctx: AuditContext = auditContext()): void {
+    if (this.socket) {
+      audit.instrumentDisconnect({ host: this.host, port: this.port, reason }, ctx);
+    }
     const pending = this.queryQueue.splice(0);
     this.queryRunning = false;
     if (this.responseReject) {
@@ -159,35 +211,91 @@ export class SiglentConnection {
   }
 
   async sendCommand(cmd: string): Promise<void> {
+    return this.sendCommandIn(cmd, auditContext());
+  }
+
+  async query(cmd: string, timeout: number = DEFAULT_TIMEOUT): Promise<string> {
+    return this.queryIn(cmd, timeout, auditContext());
+  }
+
+  /** sendCommand with an explicit audit context (see the class comment on contexts). */
+  private async sendCommandIn(cmd: string, ctx: AuditContext): Promise<void> {
     // The connection is the single choke point to the instrument, so this
     // check applies regardless of which tool built the command.
-    assertWireSafe(cmd);
+    this.guard(() => assertWireSafe(cmd), cmd, ctx);
     this.ensureConnected();
 
+    const writeId = audit.nextWriteId();
+    const startedAt = Date.now();
+    // Recorded before the bytes are written, so an attempt is on record even
+    // if the process dies during the write.
+    audit.scpiWrite({ writeId, command: cmd, kind: "command", host: this.host, port: this.port }, ctx);
     return new Promise((resolve, reject) => {
       this.socket!.write(cmd + "\n", (err) => {
+        audit.scpiResult({ writeId, outcome: err ? "write_failed" : "written", startedAt }, ctx);
         if (err) reject(new Error(`Write failed: ${err.message}`));
         else resolve();
       });
     });
   }
 
-  async query(cmd: string, timeout: number = DEFAULT_TIMEOUT): Promise<string> {
+  private async queryIn(cmd: string, timeout: number, ctx: AuditContext): Promise<string> {
     // A query must be structurally a query; otherwise "C1:OUTP ON" sent via a
     // read-only tool would change state and simply time out waiting for a reply.
-    assertIsQuery(cmd);
+    this.guard(() => assertIsQuery(cmd), cmd, ctx);
     this.ensureConnected();
-    const buf = await this.enqueueQuery(cmd, false, timeout);
+    const buf = await this.enqueueQuery(cmd, false, timeout, ctx);
     return buf.toString("utf-8").trim();
+  }
+
+  /** Run a guard check, recording a refusal before it propagates. */
+  private guard(check: () => void, cmd: string, ctx: AuditContext): void {
+    try {
+      check();
+    } catch (err) {
+      if (err instanceof ScpiPolicyError) {
+        audit.guardRefused({ guard: guardOf(err.rule), rule: err.rule, message: err.message, command: cmd }, ctx);
+      }
+      throw err;
+    }
   }
 
   private enqueueQuery(
     cmd: string,
     binary: boolean,
-    timeout: number
+    timeout: number,
+    ctx: AuditContext
   ): Promise<Buffer> {
+    const writeId = audit.nextWriteId();
     return new Promise<Buffer>((resolve, reject) => {
-      this.queryQueue.push({ cmd, binary, timeout, resolve, reject });
+      // Every way a query ends goes through these two, so each write id gets
+      // exactly one scpi.result, recorded with the query's own context.
+      // A query settles once. A late callback (a write error arriving after a
+      // timeout, say) must not record a second result or reject it again.
+      let settled = false;
+      const q: QueuedQuery = {
+        cmd,
+        binary,
+        timeout,
+        ctx,
+        writeId,
+        written: false,
+        resolve: (buf) => {
+          if (settled) return;
+          settled = true;
+          audit.scpiResult({ writeId, outcome: "replied", startedAt: q.startedAt, reply: buf, binary }, ctx);
+          resolve(buf);
+        },
+        reject: (err) => {
+          if (settled) return;
+          settled = true;
+          const tagged = (err as { auditOutcome?: ScpiOutcome }).auditOutcome;
+          const outcome = tagged ?? (q.written ? "connection_closed" : "not_written");
+          audit.scpiResult({ writeId, outcome, startedAt: q.startedAt }, ctx);
+          reject(err);
+        },
+      };
+      this.queryQueue.push(q);
       this.drainQueue();
     });
   }
@@ -196,7 +304,8 @@ export class SiglentConnection {
     if (this.queryRunning || this.queryQueue.length === 0) return;
     this.queryRunning = true;
 
-    const { cmd, binary, timeout, resolve, reject } = this.queryQueue.shift()!;
+    const q = this.queryQueue.shift()!;
+    const { cmd, binary, timeout, resolve, reject } = q;
 
     this.expectedBinaryLength = null;
     this.binaryDataStart = 0;
@@ -208,27 +317,37 @@ export class SiglentConnection {
       resolve(buf);
       this.drainQueue();
     };
-    this.responseReject = (err) => {
+    const onReject = (err: Error) => {
       this.queryRunning = false;
       reject(err);
       this.drainQueue();
     };
+    this.responseReject = onReject;
 
     this.responseTimer = setTimeout(() => {
       this.clearPending();
-      const err = new Error(
-        `${binary ? "Binary query" : "Query"} timeout after ${timeout}ms for command: ${cmd}`
+      const err = outcomeError(
+        `${binary ? "Binary query" : "Query"} timeout after ${timeout}ms for command: ${cmd}`,
+        "timeout"
       );
       this.queryRunning = false;
       reject(err);
       this.drainQueue();
     }, timeout);
 
+    q.written = true;
+    q.startedAt = Date.now();
+    audit.scpiWrite(
+      { writeId: q.writeId, command: cmd, kind: binary ? "binary-query" : "query", host: this.host, port: this.port },
+      q.ctx
+    );
     this.socket!.write(cmd + "\n", (err) => {
-      if (err) {
+      // Only while this query is still the current one: a write error that
+      // arrives after it ended must not clear the next query's state.
+      if (err && this.responseReject === onReject) {
         this.clearPending();
         this.queryRunning = false;
-        reject(new Error(`Write failed: ${err.message}`));
+        reject(outcomeError(`Write failed: ${err.message}`, "write_failed"));
         this.drainQueue();
       }
     });
@@ -241,6 +360,12 @@ export class SiglentConnection {
     });
 
     this.socket!.on("close", () => {
+      // The instrument (or the network) closed the socket: no call caused it.
+      audit.instrumentDisconnect(
+        { host: this.host, port: this.port, reason: this.lastSocketError ? "socket_error" : "socket_closed" },
+        { cause: "socket" }
+      );
+      this.lastSocketError = null;
       const pending = this.queryQueue.splice(0);
       this.queryRunning = false;
       if (this.responseReject) {
@@ -254,10 +379,17 @@ export class SiglentConnection {
     });
 
     this.socket!.on("error", (err) => {
+      this.lastSocketError = err.message;
+      // Take the queue first: the reject below would otherwise drain the next
+      // query into the dying socket. Queued queries were never written.
+      const pending = this.queryQueue.splice(0);
       if (this.responseReject) {
         this.responseReject(new Error(`Socket error: ${err.message}`));
       }
       this.clearPending();
+      for (const q of pending) {
+        q.reject(new Error(`Socket error: ${err.message}`));
+      }
     });
   }
 

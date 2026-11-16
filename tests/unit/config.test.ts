@@ -50,3 +50,20 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ [name]: value })).toThrow();
   });
 });
+
+describe("SIGLENT_AUDIT_LOG", () => {
+  it.each([
+    [undefined, { sink: "stderr", level: "security" }],
+    ["", { sink: "stderr", level: "security" }],
+    ["stderr", { sink: "stderr", level: "full" }],
+    ["STDERR", { sink: "stderr", level: "full" }],
+    ["off", { sink: "off" }],
+    ["/var/log/sdg.jsonl", { sink: "file", level: "full", path: "/var/log/sdg.jsonl" }],
+  ])("%s -> %o", (value, expected) => {
+    expect(loadConfig(value === undefined ? {} : { SIGLENT_AUDIT_LOG: value }).audit).toEqual(expected);
+  });
+
+  it.each(["audit.jsonl", "./logs/a.jsonl", "on"])("fails closed on %s (not an absolute path)", (value) => {
+    expect(() => loadConfig({ SIGLENT_AUDIT_LOG: value })).toThrow(/SIGLENT_AUDIT_LOG/);
+  });
+});
