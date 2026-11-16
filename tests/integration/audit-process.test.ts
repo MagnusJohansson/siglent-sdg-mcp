@@ -6,7 +6,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, mkdtempSync, openSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SdgSimulator, SIM_IDN } from "../simulator/sdg-simulator.js";
@@ -142,8 +142,12 @@ describe("audit log in a server process", () => {
     await waitConnected(s, file);
     s.child.kill("SIGTERM");
     expect(await s.exited).toBe(0);
-    expect(statSync(file).mode & 0o777).toBe(0o600);
-    const records = auditLines(readFileSync(file, "utf8"));
+    // One descriptor for both the mode and the content.
+    const fd = openSync(file, "r");
+    const mode = fstatSync(fd).mode;
+    const records = auditLines(readFileSync(fd, "utf8"));
+    closeSync(fd);
+    expect(mode & 0o777).toBe(0o600);
     expect(records.at(-1)).toMatchObject({ "event.name": "server.stop", reason: "signal", "audit.sink": "file" });
     expect(records.find((r) => r["event.name"] === "instrument.connect")).toMatchObject({ outcome: "connected", "instrument.idn": SIM_IDN, cause: "auto-connect" });
     // In the file sink, the full trail: wire events too.
