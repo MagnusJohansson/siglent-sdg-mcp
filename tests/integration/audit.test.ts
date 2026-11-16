@@ -112,11 +112,64 @@ describe("audit log", () => {
     expect(full.events("scpi.write")).toEqual([]);
   });
 
+  it("doesn't take tool error text that mentions the SDK's schema error for a schema refusal", async () => {
+    // The tool error repeats the input; only the SDK's exact prefix counts.
+    await callTool(ctx.client, "scpi_query", { command: "Input validation error" });
+    expect(security.events("guard.refused").map((r) => r["rule"])).toEqual(["query.not_a_query"]);
+  });
+
+  it("closes a cancelled call with outcome cancelled", async () => {
+    sim.silent.add("C1:SILENT?");
+    const controller = new AbortController();
+    const call = ctx.client.callTool(
+      { name: "scpi_query", arguments: { command: "C1:SILENT?", timeout_ms: 2000 } },
+      undefined,
+      { signal: controller.signal }
+    );
+    await new Promise((r) => setTimeout(r, 100));
+    controller.abort();
+    await expect(call).rejects.toThrow();
+    await new Promise((r) => setTimeout(r, 2200)); // the query itself ends (timeout); no second response
+    const id = requestIdFor(full, "C1:SILENT?");
+    const responses = full.events("mcp.response").filter((r) => r["jsonrpc.request.id"] === id);
+    expect(responses).toEqual([expect.objectContaining({ outcome: "cancelled" })]);
+    // The instrument side still ends on record.
+    const [write] = writesOf(full, "C1:SILENT?");
+    expect(resultOf(full, write["scpi.write_id"])).toEqual([expect.objectContaining({ outcome: "timeout" })]);
+  });
+
+  it("records queued queries as not written when the instrument resets the connection", async () => {
+    sim.silent.add("C1:SILENT?");
+    const pending = [
+      callTool(ctx.client, "scpi_query", { command: "C1:SILENT?", timeout_ms: 5000 }),
+      callTool(ctx.client, "scpi_query", { command: "C2:BSWV?" }),
+    ];
+    await new Promise((r) => setTimeout(r, 100));
+    sim.resetConnections();
+    await Promise.all(pending);
+
+    const [written] = writesOf(full, "C1:SILENT?");
+    expect(resultOf(full, written["scpi.write_id"])).toEqual([expect.objectContaining({ outcome: "connection_closed" })]);
+    // The queued query never reached the dying socket.
+    expect(writesOf(full, "C2:BSWV?")).toEqual([]);
+    const nextId = requestIdFor(full, "C2:BSWV?");
+    expect(full.events("scpi.result").filter((r) => r["jsonrpc.request.id"] === nextId)).toEqual([
+      expect.objectContaining({ outcome: "not_written" }),
+    ]);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(security.events("instrument.disconnect")).toEqual([
+      expect.objectContaining({ reason: "socket_error", cause: "socket" }),
+    ]);
+  });
+
   it("records a call to the disabled scpi_command as a refusal", async () => {
     await callTool(ctx.client, "scpi_command", { command: "C1:OUTP ON" });
     expect(security.events("guard.refused")).toEqual([
       expect.objectContaining({ guard: "raw-scpi", rule: "raw.disabled", "scpi.command": "C1:OUTP ON" }),
     ]);
+    // The request is beside the refusal at the default level.
+    const id = security.events("guard.refused")[0]["jsonrpc.request.id"];
+    expect(security.events("mcp.request").some((r) => r["jsonrpc.request.id"] === id)).toBe(true);
   });
 
   it("records an unknown tool in the full trail", async () => {

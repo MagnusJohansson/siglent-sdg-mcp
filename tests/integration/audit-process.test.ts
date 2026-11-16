@@ -5,8 +5,8 @@
  * stderr pipe that must not stall the server.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { closeSync, existsSync, fstatSync, mkdtempSync, openSync, readFileSync, rmSync } from "node:fs";
+import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { closeSync, constants, existsSync, fstatSync, mkdtempSync, openSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SdgSimulator, SIM_IDN } from "../simulator/sdg-simulator.js";
@@ -50,7 +50,10 @@ function start(env: Record<string, string>, opts: { readStderr?: boolean } = {})
   const readStderr = () => child.stderr.on("data", (c: Buffer) => (stderr += c.toString()));
   if (opts.readStderr !== false) readStderr();
   // "close", not "exit": exit can fire before the stdio streams have delivered everything.
-  const exited = new Promise<number | null>((resolve) => child.on("close", (code) => resolve(code)));
+  const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) =>
+    child.on("close", (code, signal) => resolve({ code, signal }))
+  );
+  const exited = closed.then((r) => r.code);
   let nextId = 1;
   const send = (msg: Record<string, unknown>) => child.stdin.write(JSON.stringify({ jsonrpc: "2.0", ...msg }) + "\n");
   const request = async (method: string, params: Record<string, unknown> = {}) => {
@@ -66,7 +69,7 @@ function start(env: Record<string, string>, opts: { readStderr?: boolean } = {})
     send({ method: "notifications/initialized" });
   };
   const call = (name: string, args: Record<string, unknown> = {}) => request("tools/call", { name, arguments: args });
-  return { child, stdoutLines, stderr: () => stderr, readStderr, exited, init, call };
+  return { child, stdoutLines, stderr: () => stderr, readStderr, exited, closed, init, call };
 }
 
 function auditLines(text: string): Array<Record<string, unknown>> {
@@ -199,4 +202,38 @@ describe("audit log in a server process", () => {
     expect(s.stderr()).toMatch(/audit: \d+ events were lost on the stderr sink/);
     expect(Number(records.find((r) => r["event.name"] === "server.stop")?.["audit.lost"])).toBeGreaterThan(0);
   }, 90_000);
+
+  it("shuts down within its time limits while stderr is unread", async () => {
+    const s = start({ SIGLENT_AUDIT_LOG: "stderr" }, { readStderr: false });
+    await s.init();
+    await new Promise((res) => setTimeout(res, 1000));
+    for (let i = 0; i < 300; i++) await s.call("scpi_query", { command: "*IDN?" }); // fill the pipe
+    const t0 = Date.now();
+    s.child.stdin.end();
+    s.readStderr(); // so the process can be reaped; the server has already given up on stderr
+    const { code } = await s.closed;
+    expect(code).toBe(0);
+    expect(Date.now() - t0).toBeLessThan(5000);
+  }, 60_000);
+
+  it("is killed rather than hanging when a write is stuck in the kernel", async () => {
+    // A FIFO with a reader that never reads: writes to it block in the thread
+    // pool, which process.exit would wait for forever.
+    const fifo = join(dir, "stuck.fifo");
+    execFileSync("mkfifo", [fifo]);
+    const holder = openSync(fifo, constants.O_RDONLY | constants.O_NONBLOCK);
+    try {
+      const s = start({ SIGLENT_AUDIT_LOG: fifo });
+      await s.init();
+      await new Promise((res) => setTimeout(res, 1000));
+      for (let i = 0; i < 300; i++) await s.call("scpi_query", { command: "*IDN?" }); // fill the FIFO
+      const t0 = Date.now();
+      s.child.stdin.end();
+      const { signal } = await s.closed;
+      expect(signal).toBe("SIGKILL");
+      expect(Date.now() - t0).toBeLessThan(5000);
+    } finally {
+      closeSync(holder);
+    }
+  }, 60_000);
 });

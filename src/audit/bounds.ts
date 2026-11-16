@@ -1,6 +1,10 @@
 /** Size limits for logged content (docs/audit-log-design.md, "Content limits"). */
 
-/** Every logged string; the wire limit is 512 too. */
+/**
+ * Strings logged from arguments, commands, replies and errors; the wire limit
+ * is 512 too. Names and ids from the client (tool, method, request id) are
+ * bounded at 128, the protocol version at 64, human-readable lines at 4096.
+ */
 export const MAX_STRING = 512;
 /** Tool arguments, as one JSON string. */
 export const MAX_ARGUMENTS = 4096;
@@ -12,10 +16,18 @@ export function bound(value: string, max: number = MAX_STRING): string {
   return `${value.slice(0, max)}…[truncated, ${value.length} chars]`;
 }
 
-/** Tool arguments as JSON, each string bounded, the whole bounded too. */
+/**
+ * Tool arguments as JSON, each string bounded, the whole bounded too.
+ * Arguments that can't be serialised (nested too deep for the stack, for
+ * instance) are logged as a placeholder rather than failing the call.
+ */
 export function boundArguments(args: unknown): string {
-  const json = JSON.stringify(args ?? {}, (_key, v: unknown) => (typeof v === "string" ? bound(v) : v));
-  return bound(json, MAX_ARGUMENTS);
+  try {
+    const json = JSON.stringify(args ?? {}, (_key, v: unknown) => (typeof v === "string" ? bound(v) : v));
+    return bound(json, MAX_ARGUMENTS);
+  } catch (err) {
+    return `[arguments not logged: ${err instanceof Error ? err.message : String(err)}]`;
+  }
 }
 
 /** A tool result's content as types and sizes, never the content itself. */

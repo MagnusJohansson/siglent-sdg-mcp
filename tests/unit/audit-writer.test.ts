@@ -65,6 +65,38 @@ describe("FdWriter", () => {
     expect(f.calls()).toBe(1); // no retry
   });
 
+  it("resolves a waiting flush as soon as EPIPE closes the writer", async () => {
+    const held: Callback[] = [];
+    const w = new FdWriter(9, { write: (_fd, _buf, _off, _len, _pos, cb) => held.push(cb) });
+    w.write("a\n");
+    const started = Date.now();
+    const flushed = w.flush(5000);
+    held[0](Object.assign(new Error("EPIPE"), { code: "EPIPE" }), 0);
+    await flushed;
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+
+  it("starts a fresh line after a line that failed part-way", async () => {
+    const f = fakeWrite([() => ({ written: 3 }), () => ({ err: "ENOSPC" })]);
+    const w = new FdWriter(9, { write: f.write });
+    let lost = 0;
+    w.write("hello\n", () => lost++);
+    w.write("next\n");
+    await w.flush(1000);
+    expect(lost).toBe(1);
+    // The fragment "hel" is ended, so "next" parses as its own line.
+    expect(f.out.join("")).toBe("hel\nnext\n");
+  });
+
+  it("reports a write in the thread pool, but not one waiting out a backoff", async () => {
+    const held: Callback[] = [];
+    const w = new FdWriter(9, { write: (_fd, _buf, _off, _len, _pos, cb) => held.push(cb) });
+    w.write("a\n");
+    expect(w.writeInFlight).toBe(true);
+    held[0](Object.assign(new Error("EAGAIN"), { code: "EAGAIN" }), 0);
+    expect(w.writeInFlight).toBe(false); // waiting for the retry timer
+  });
+
   it("loses only the failing line on another error", async () => {
     const f = fakeWrite([() => ({ err: "EIO" })]);
     const w = new FdWriter(9, { write: f.write });

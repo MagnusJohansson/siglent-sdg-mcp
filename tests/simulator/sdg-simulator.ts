@@ -56,6 +56,11 @@ export class SdgSimulator {
   }
 
   /** Lines received, excluding *OPC? sync barriers. */
+  /** Reset every client connection (TCP RST), as a crashed instrument would. */
+  resetConnections(): void {
+    for (const s of this.sockets) s.resetAndDestroy();
+  }
+
   /** Queries (upper case) the simulator never answers, to exercise timeouts. */
   readonly silent = new Set<string>();
 

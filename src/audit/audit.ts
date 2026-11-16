@@ -65,6 +65,8 @@ export interface AuditSink {
   takeLost?(): number;
   /** Wait until accepted records are written, or the timeout passes. */
   flush?(timeoutMs: number): Promise<boolean>;
+  /** A write is stuck in the thread pool right now (see FdWriter.writeInFlight). */
+  writeInFlight?(): boolean;
 }
 
 /** A sink that writes JSON lines through an FdWriter (stderr or a file). */
@@ -85,6 +87,9 @@ export class JsonlSink implements AuditSink {
   }
   flush(timeoutMs: number): Promise<boolean> {
     return this.writer.flush(timeoutMs);
+  }
+  writeInFlight(): boolean {
+    return this.writer.writeInFlight;
   }
 }
 
@@ -175,7 +180,9 @@ export class Audit {
    * A human-readable line on stderr, through the same non-blocking queue as
    * the audit events. Dropped (and counted) when the queue is full.
    */
-  log(message: string): void {
+  log(text: string): void {
+    // Stack traces and instrument errors can be long; keep a line bounded.
+    const message = bound(text, 4096);
     if (!this.stderr) {
       // Not configured yet (startup, tests): nothing else writes to stderr.
       logSync(message);
@@ -223,7 +230,7 @@ export class Audit {
       "client.name": fields.client?.name !== undefined ? bound(fields.client.name, 128) : undefined,
       "client.version": fields.client?.version !== undefined ? bound(fields.client.version, 64) : undefined,
       "client.self_reported": fields.client?.name !== undefined ? true : undefined,
-      "mcp.protocol.version": fields.client?.protocolVersion,
+      "mcp.protocol.version": fields.client?.protocolVersion !== undefined ? bound(fields.client.protocolVersion, 64) : undefined,
     }, ctx);
   }
 
@@ -232,7 +239,7 @@ export class Audit {
     fields: {
       method: string;
       tool?: string;
-      outcome: "ok" | "tool_error" | "jsonrpc_error";
+      outcome: "ok" | "tool_error" | "jsonrpc_error" | "cancelled";
       errorType?: string;
       statusCode?: string;
       errorMessage?: string;
@@ -324,6 +331,11 @@ export class Audit {
   /** Total records lost across all sinks, and human-readable lines lost. */
   get lost(): { events: number; lines: number } {
     return { events: this.sinks.reduce((n, s) => n + s.lostTotal, 0), lines: this.humanLost };
+  }
+
+  /** Some sink, or stderr, has a write stuck in the thread pool. */
+  get writeInFlight(): boolean {
+    return (this.stderr?.writeInFlight ?? false) || this.sinks.some((s) => s.sink.writeInFlight?.() ?? false);
   }
 
   /** Wait for every sink and stderr to drain, or the timeout to pass. */

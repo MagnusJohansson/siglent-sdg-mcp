@@ -1,13 +1,16 @@
 /**
  * A writer that never blocks the event loop.
  *
- * On Linux, Node writes to pipes and files synchronously. A client that pipes
- * the server's stderr and never reads it would fill the pipe (~64 KB) and
- * stall every tool call; so would a file on a hung network filesystem. This
- * writer keeps lines in a bounded queue and drains it with one `fs.write` at a
- * time on the libuv thread pool. A stuck write ties up one pool thread, never
- * the event loop. When the queue is full, lines are dropped and the caller is
- * told, so the loss can be counted.
+ * Node's own stderr writes are synchronous for pipes and files on Linux. A
+ * client that pipes the server's stderr and never reads it would fill the
+ * pipe (~64 KB) and stall every tool call; so would a file on a hung network
+ * filesystem. This writer keeps lines in a bounded queue and drains it with
+ * one `fs.write` at a time on the libuv thread pool. When the descriptor is
+ * blocking, a stuck write ties up one pool thread, never the event loop; when
+ * it's non-blocking (stderr usually is, because Node's process.stderr sets
+ * O_NONBLOCK once anything reads it), a full pipe returns EAGAIN and the
+ * writer retries with a backoff. When the queue is full, lines are dropped
+ * and the caller is told, so the loss can be counted.
  *
  * It is the only writer to its descriptor, so a short write is simply
  * continued: lines are never interleaved, whatever the platform's PIPE_BUF.
@@ -43,6 +46,10 @@ export class FdWriter {
   private readonly maxQueue: number;
   private readonly writeFn: WriteFn;
   private writing = false;
+  /** An fs.write is in the thread pool right now (not just waiting out a backoff). */
+  private inPool = false;
+  /** A write failed part-way: the next line must start on a fresh line. */
+  private fragment = false;
   private closed = false;
   private backoffMs = 0;
   private idleWaiters: Array<() => void> = [];
@@ -68,6 +75,15 @@ export class FdWriter {
     return this.queue.length;
   }
 
+  /**
+   * True while an fs.write is in the thread pool. Node joins the pool when the
+   * process exits, so exiting now would wait for that write, possibly forever
+   * (a hung network filesystem, a FIFO nobody reads).
+   */
+  get writeInFlight(): boolean {
+    return this.inPool;
+  }
+
   /** True once the reader has gone (EPIPE) or the descriptor is invalid. */
   get isClosed(): boolean {
     return this.closed;
@@ -86,20 +102,27 @@ export class FdWriter {
   }
 
   private pump(): void {
-    if (this.writing || this.closed) return;
+    if (this.writing) return;
     const item = this.queue[0];
-    if (!item) {
+    if (!item || this.closed) {
       const waiters = this.idleWaiters;
       this.idleWaiters = [];
       for (const w of waiters) w();
       return;
+    }
+    if (this.fragment) {
+      // The previous line was cut off part-way: end it, so this one parses.
+      item.buf = Buffer.concat([Buffer.from("\n"), item.buf]);
+      this.fragment = false;
     }
     this.writing = true;
     this.writeFrom(item, 0);
   }
 
   private writeFrom(item: Item, offset: number): void {
+    this.inPool = true;
     this.writeFn(this.fd, item.buf, offset, item.buf.length - offset, null, (err, written) => {
+      this.inPool = false;
       if (err) {
         if (err.code === "EAGAIN") {
           // Non-blocking descriptor that is full: retry the same bytes later.
@@ -115,7 +138,8 @@ export class FdWriter {
           this.pump();
           return;
         }
-        // Any other error loses this line only.
+        // Any other error (ENOSPC, EIO) loses this line only.
+        if (offset > 0) this.fragment = true;
         this.queue.shift();
         item.onLost?.();
         this.writing = false;

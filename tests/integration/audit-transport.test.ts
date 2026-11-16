@@ -79,8 +79,20 @@ describe("transport hooks on the stdio transport (SDK contract)", () => {
     );
     const res = (await waitFor("9")) as { result?: { isError?: boolean; content?: Array<{ text?: string }> } };
     expect(res.result?.isError).toBe(true);
-    expect(res.result?.content?.[0]?.text).toContain("Input validation error");
+    // The exact prefix the hook matches (transport.ts schemaErrorPrefix).
+    expect(res.result?.content?.[0]?.text).toMatch(
+      /^MCP error -32602: Input validation error: Invalid arguments for tool configure_output:/
+    );
     expect(sink.events("guard.refused").map((r) => r["rule"])).toContain("schema.invalid");
+
+    // Arguments the audit code can't serialise (too deep for the stack): the
+    // call is still handled and answered, and logged with a placeholder.
+    const deep = `{"x":${"[".repeat(5000)}${"]".repeat(5000)}}`;
+    stdin.write(`{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"get_output","arguments":${deep}}}\n`);
+    expect(await waitFor("11")).toBeDefined();
+    const deepReq = sink.events("mcp.request").find((r) => r["jsonrpc.request.id"] === "11");
+    expect(String(deepReq?.["gen_ai.tool.call.arguments"])).toMatch(/^\[arguments not logged/);
+    expect(sink.events("mcp.response").some((r) => r["jsonrpc.request.id"] === "11")).toBe(true);
 
     await server.close();
   });

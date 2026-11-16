@@ -19,7 +19,7 @@
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { audit, withAuditContext, type AuditContext, type AuditLevel } from "./audit.js";
-import { boundArguments, firstText, summariseContent } from "./bounds.js";
+import { bound, boundArguments, firstText, summariseContent } from "./bounds.js";
 
 export interface TransportAuditOptions {
   /** Whether scpi_command is registered; a call to it while disabled is a refusal. */
@@ -35,8 +35,26 @@ interface Pending {
 
 type MessageHandler = NonNullable<Transport["onmessage"]>;
 
-/** The SDK reports schema failures as a tool error with this prefix (SDK 1.32, pinned by a test). */
-const SCHEMA_ERROR = "Input validation error";
+/**
+ * How the SDK reports a schema failure: a tool error that starts with exactly
+ * this, then the tool's name (SDK 1.32, pinned by the contract test). Only the
+ * start is matched: many tool errors repeat their input, so a substring match
+ * would let anyone who controls an argument forge a schema.invalid refusal.
+ */
+const schemaErrorPrefix = (tool: string) => `MCP error -32602: Input validation error: Invalid arguments for tool ${tool}:`;
+
+/**
+ * Audit work must never stop a message from being handled: a throw here (a
+ * bug, or an argument the bounds can't serialise) is reported and swallowed,
+ * and the SDK still gets the message.
+ */
+function safely(work: () => void): void {
+  try {
+    work();
+  } catch (err) {
+    audit.log(`audit: transport hook error: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
 
 export function auditTransport(transport: Transport, options: TransportAuditOptions): void {
   const pending = new Map<string, Pending>();
@@ -46,16 +64,42 @@ export function auditTransport(transport: Transport, options: TransportAuditOpti
   const wrapped: MessageHandler = (message, extra) => {
     const m = message as { id?: string | number; method?: unknown; params?: Record<string, unknown> };
     if (typeof m.method !== "string") return inner?.(message, extra);
+    const method = m.method;
 
     if (m.id === undefined) {
-      // A notification (e.g. notifications/cancelled; a cancelled call's
-      // instrument writes continue, and the log shows both).
-      audit.mcpRequest("full", { method: m.method, client }, { cause: "tool-call" });
+      safely(() => {
+        audit.mcpRequest("full", { method: bound(method, 128), client }, { cause: "tool-call" });
+        // A cancelled call gets no response from the SDK; close its entry here,
+        // at the call's own level, so the default log shows how it ended. Its
+        // instrument writes may still complete; the full trail shows them.
+        if (method === "notifications/cancelled") {
+          const id = (m.params as { requestId?: unknown } | undefined)?.requestId;
+          const p = id !== undefined ? pending.get(String(id)) : undefined;
+          if (p) {
+            pending.delete(String(id));
+            audit.mcpResponse(p.level, {
+              method: p.method,
+              tool: p.tool,
+              outcome: "cancelled",
+              durationMs: Date.now() - p.startedAt,
+            }, { requestId: String(id), cause: "tool-call" });
+          }
+        }
+      });
       return inner?.(message, extra);
     }
 
-    const ctx: AuditContext = { requestId: String(m.id), cause: "tool-call" };
-    if (m.method === "initialize") {
+    const ctx: AuditContext = { requestId: bound(String(m.id), 128), cause: "tool-call" };
+    safely(() => record(m, method, ctx));
+    return withAuditContext(ctx, () => inner?.(message, extra));
+  };
+
+  const record = (
+    m: { id?: string | number; params?: Record<string, unknown> },
+    method: string,
+    ctx: AuditContext
+  ): void => {
+    if (method === "initialize") {
       const info = (m.params?.clientInfo ?? {}) as { name?: unknown; version?: unknown };
       client = {
         name: typeof info.name === "string" ? info.name : undefined,
@@ -63,17 +107,22 @@ export function auditTransport(transport: Transport, options: TransportAuditOpti
         protocolVersion: typeof m.params?.protocolVersion === "string" ? m.params.protocolVersion : undefined,
       };
     }
-    const tool = m.method === "tools/call" ? String(m.params?.name ?? "") : undefined;
-    const level: AuditLevel = tool !== undefined && audit.isStateChanging(tool) ? "security" : "full";
-    pending.set(ctx.requestId!, { method: m.method, tool, level, startedAt: Date.now() });
+    const tool = method === "tools/call" ? bound(String(m.params?.name ?? ""), 128) : undefined;
+    // A call to the disabled scpi_command is a security event too: its
+    // refusal should have its request beside it at the default level.
+    const disabledRaw = tool === "scpi_command" && !options.rawScpiEnabled;
+    const level: AuditLevel =
+      tool !== undefined && (audit.isStateChanging(tool) || disabledRaw) ? "security" : "full";
+    const args = tool !== undefined ? boundArguments(m.params?.arguments) : undefined;
+    pending.set(String(m.id), { method: bound(method, 128), tool, level, startedAt: Date.now() });
     audit.mcpRequest(level, {
-      method: m.method,
+      method: bound(method, 128),
       tool,
-      arguments: tool !== undefined ? boundArguments(m.params?.arguments) : undefined,
+      arguments: args,
       annotations: tool !== undefined ? audit.registeredTools.get(tool) : undefined,
       client,
     }, ctx);
-    if (tool === "scpi_command" && !options.rawScpiEnabled) {
+    if (disabledRaw) {
       audit.guardRefused({
         guard: "raw-scpi",
         rule: "raw.disabled",
@@ -83,7 +132,6 @@ export function auditTransport(transport: Transport, options: TransportAuditOpti
           : undefined,
       }, ctx);
     }
-    return withAuditContext(ctx, () => inner?.(message, extra));
   };
 
   Object.defineProperty(transport, "onmessage", {
@@ -102,10 +150,19 @@ export function auditTransport(transport: Transport, options: TransportAuditOpti
       result?: { isError?: boolean; content?: unknown };
       error?: { code?: number; message?: string };
     };
+    safely(() => recordResponse(m));
+    return send(message, sendOptions);
+  };
+
+  const recordResponse = (m: {
+    id?: string | number;
+    result?: { isError?: boolean; content?: unknown };
+    error?: { code?: number; message?: string };
+  }): void => {
     const p = m.id !== undefined ? pending.get(String(m.id)) : undefined;
     if (p && ("result" in m || "error" in m)) {
       pending.delete(String(m.id));
-      const ctx: AuditContext = { requestId: String(m.id), cause: "tool-call" };
+      const ctx: AuditContext = { requestId: bound(String(m.id), 128), cause: "tool-call" };
       const durationMs = Date.now() - p.startedAt;
       if (m.error) {
         audit.mcpResponse(p.level, {
@@ -120,7 +177,7 @@ export function auditTransport(transport: Transport, options: TransportAuditOpti
       } else {
         const isError = m.result?.isError === true;
         const errorMessage = isError ? firstText(m.result?.content) : undefined;
-        if (isError && p.tool !== undefined && errorMessage?.includes(SCHEMA_ERROR)) {
+        if (isError && p.tool !== undefined && errorMessage?.startsWith(schemaErrorPrefix(p.tool))) {
           audit.guardRefused({ guard: "schema", rule: "schema.invalid", message: errorMessage }, ctx);
         }
         audit.mcpResponse(p.level, {
@@ -134,12 +191,11 @@ export function auditTransport(transport: Transport, options: TransportAuditOpti
         }, ctx);
       }
     }
-    return send(message, sendOptions);
   };
 
   const previousOnError = transport.onerror;
   transport.onerror = (error: Error) => {
-    audit.mcpMalformed(error);
+    safely(() => audit.mcpMalformed(error));
     previousOnError?.(error);
   };
 }

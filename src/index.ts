@@ -74,15 +74,28 @@ function describeAudit(a: AuditConfig): string {
 // socket would otherwise keep the process alive after stdin closes.
 let stopping = false;
 async function shutdown(reason: "stdin_closed" | "signal"): Promise<void> {
-  if (stopping) return;
+  if (stopping) {
+    // A second signal: the first shutdown is stuck. Stop now.
+    if (reason === "signal") hardExit();
+    return;
+  }
   stopping = true;
   connection.disconnect("shutdown", { cause: "shutdown" });
   // Drain first, so server.stop (last, with the final loss count) isn't
   // dropped by a queue that's still full from a stalled stderr.
   await audit.flush(1000);
   audit.serverStop(reason);
-  await audit.flush(1000);
+  const drained = await audit.flush(1000);
+  // process.exit joins the libuv thread pool, so it would wait for a write
+  // stuck in the kernel (a hung network filesystem, a FIFO nobody reads)
+  // without any time limit. What's still queued is lost either way.
+  if (!drained && audit.writeInFlight) hardExit();
   process.exit(0);
+}
+
+/** Exit without joining the thread pool. */
+function hardExit(): void {
+  process.kill(process.pid, "SIGKILL");
 }
 
 async function main(): Promise<void> {

@@ -148,7 +148,7 @@ export class SiglentConnection {
 
           // Try to set CHDR OFF for clean responses (not all SDG models support it)
           try {
-            await this.sendCommand("CHDR OFF");
+            await this.sendCommandIn("CHDR OFF", ctx);
             await this.delay(100);
           } catch {
             // Some models don't support CHDR — that's OK
@@ -156,7 +156,7 @@ export class SiglentConnection {
           if (superseded()) throw new Error("superseded by a newer connect");
 
           // Query identification
-          const idn = await this.query("*IDN?");
+          const idn = await this.queryIn("*IDN?", DEFAULT_TIMEOUT, ctx);
           if (superseded()) throw new Error("superseded by a newer connect");
           resolve(idn);
         } catch (err) {
@@ -211,7 +211,15 @@ export class SiglentConnection {
   }
 
   async sendCommand(cmd: string): Promise<void> {
-    const ctx = auditContext();
+    return this.sendCommandIn(cmd, auditContext());
+  }
+
+  async query(cmd: string, timeout: number = DEFAULT_TIMEOUT): Promise<string> {
+    return this.queryIn(cmd, timeout, auditContext());
+  }
+
+  /** sendCommand with an explicit audit context (see the class comment on contexts). */
+  private async sendCommandIn(cmd: string, ctx: AuditContext): Promise<void> {
     // The connection is the single choke point to the instrument, so this
     // check applies regardless of which tool built the command.
     this.guard(() => assertWireSafe(cmd), cmd, ctx);
@@ -231,10 +239,9 @@ export class SiglentConnection {
     });
   }
 
-  async query(cmd: string, timeout: number = DEFAULT_TIMEOUT): Promise<string> {
+  private async queryIn(cmd: string, timeout: number, ctx: AuditContext): Promise<string> {
     // A query must be structurally a query; otherwise "C1:OUTP ON" sent via a
     // read-only tool would change state and simply time out waiting for a reply.
-    const ctx = auditContext();
     this.guard(() => assertIsQuery(cmd), cmd, ctx);
     this.ensureConnected();
     const buf = await this.enqueueQuery(cmd, false, timeout, ctx);
@@ -263,6 +270,9 @@ export class SiglentConnection {
     return new Promise<Buffer>((resolve, reject) => {
       // Every way a query ends goes through these two, so each write id gets
       // exactly one scpi.result, recorded with the query's own context.
+      // A query settles once. A late callback (a write error arriving after a
+      // timeout, say) must not record a second result or reject it again.
+      let settled = false;
       const q: QueuedQuery = {
         cmd,
         binary,
@@ -271,10 +281,14 @@ export class SiglentConnection {
         writeId,
         written: false,
         resolve: (buf) => {
+          if (settled) return;
+          settled = true;
           audit.scpiResult({ writeId, outcome: "replied", startedAt: q.startedAt, reply: buf, binary }, ctx);
           resolve(buf);
         },
         reject: (err) => {
+          if (settled) return;
+          settled = true;
           const tagged = (err as { auditOutcome?: ScpiOutcome }).auditOutcome;
           const outcome = tagged ?? (q.written ? "connection_closed" : "not_written");
           audit.scpiResult({ writeId, outcome, startedAt: q.startedAt }, ctx);
@@ -303,11 +317,12 @@ export class SiglentConnection {
       resolve(buf);
       this.drainQueue();
     };
-    this.responseReject = (err) => {
+    const onReject = (err: Error) => {
       this.queryRunning = false;
       reject(err);
       this.drainQueue();
     };
+    this.responseReject = onReject;
 
     this.responseTimer = setTimeout(() => {
       this.clearPending();
@@ -327,7 +342,9 @@ export class SiglentConnection {
       q.ctx
     );
     this.socket!.write(cmd + "\n", (err) => {
-      if (err) {
+      // Only while this query is still the current one: a write error that
+      // arrives after it ended must not clear the next query's state.
+      if (err && this.responseReject === onReject) {
         this.clearPending();
         this.queryRunning = false;
         reject(outcomeError(`Write failed: ${err.message}`, "write_failed"));
@@ -363,10 +380,16 @@ export class SiglentConnection {
 
     this.socket!.on("error", (err) => {
       this.lastSocketError = err.message;
+      // Take the queue first: the reject below would otherwise drain the next
+      // query into the dying socket. Queued queries were never written.
+      const pending = this.queryQueue.splice(0);
       if (this.responseReject) {
         this.responseReject(new Error(`Socket error: ${err.message}`));
       }
       this.clearPending();
+      for (const q of pending) {
+        q.reject(new Error(`Socket error: ${err.message}`));
+      }
     });
   }
 
