@@ -59,6 +59,10 @@ export interface OtlpSinkStatus {
   exportedRecords: number;
   /** Records rejected in partial-success answers. */
   rejected: number;
+  /** Records in exports that failed. */
+  failedRecords: number;
+  /** Records the sink refused because its queue was full. */
+  refused: number;
   lastError?: string;
 }
 
@@ -76,7 +80,16 @@ export class OtlpSink implements AuditSink {
   private settled = 0;
   private lostLater = 0;
   private flushChain: Promise<void> = Promise.resolve();
-  readonly status: OtlpSinkStatus = { exportsOk: 0, exportsFailed: 0, exportedRecords: 0, rejected: 0 };
+  readonly status: OtlpSinkStatus = {
+    exportsOk: 0,
+    exportsFailed: 0,
+    exportedRecords: 0,
+    rejected: 0,
+    failedRecords: 0,
+    refused: 0,
+  };
+  /** Loss counts carried by audit.loss records that were themselves lost. */
+  private carriedLost = 0;
 
   /**
    * Records the collector actually kept. Computed when read: the SDK reports
@@ -88,16 +101,22 @@ export class OtlpSink implements AuditSink {
   }
   private sdk?: Sdk;
 
-  /** Called by the exporter wrapper when an export finishes (exactly once per export). */
-  onExported(count: number, ok: boolean, error?: string): void {
+  /**
+   * Called by the exporter wrapper when an export finishes (exactly once per
+   * export). `carried` is the sum of the losses that audit.loss records in a
+   * failed export were reporting: those must be reported again.
+   */
+  onExported(count: number, ok: boolean, error?: string, carried = 0): void {
     this.settled += count;
     if (ok) {
       this.status.exportsOk++;
       this.status.exportedRecords += count;
     } else {
       this.status.exportsFailed++;
+      this.status.failedRecords += count;
       this.status.lastError = error;
       this.lostLater += count;
+      this.carriedLost += carried;
     }
   }
 
@@ -113,7 +132,10 @@ export class OtlpSink implements AuditSink {
   }
 
   write(record: AuditRecord): boolean {
-    if (!this.sdk || this.accepted - this.settled >= MAX_QUEUE) return false;
+    if (!this.sdk || this.accepted - this.settled >= MAX_QUEUE) {
+      this.status.refused++;
+      return false;
+    }
     this.accepted++;
     const attributes: Record<string, string | number | boolean> = {};
     for (const [k, v] of Object.entries(record)) {
@@ -135,6 +157,22 @@ export class OtlpSink implements AuditSink {
     const n = this.lostLater;
     this.lostLater = 0;
     return n;
+  }
+
+  takeUnreported(): number {
+    const n = this.carriedLost;
+    this.carriedLost = 0;
+    return n;
+  }
+
+  /**
+   * Every record that didn't reach the collector so far: refused, in a failed
+   * export, or rejected. (A rejected audit.loss record's carried count can't
+   * be re-reported: a partial-success answer doesn't say which records it
+   * rejected.)
+   */
+  get lostTotal(): number {
+    return this.status.refused + this.status.failedRecords + this.status.rejected;
   }
 
   /** Records accepted but not yet exported (or failed): at shutdown, the ones that won't arrive. */
@@ -303,10 +341,18 @@ export async function startOtlpSink(options: {
   const exporter = {
     export(records: Records, done: Callback): void {
       inner.export(records, (result) => {
+        const ok = result.code === 0;
+        // A failed audit.loss record takes its report with it: count what it carried.
+        const carried = ok
+          ? 0
+          : records
+              .filter((r) => r.eventName === "siglent.audit.audit.loss")
+              .reduce((n, r) => n + Number(r.attributes["audit.lost"] ?? 0), 0);
         sink.onExported(
           records.length,
-          result.code === 0,
-          result.error ? redactText(result.error.message.split("\n")[0], env) : undefined
+          ok,
+          result.error ? redactText(result.error.message.split("\n")[0], env) : undefined,
+          carried
         );
         done(result);
       });

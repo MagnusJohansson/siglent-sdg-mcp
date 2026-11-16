@@ -294,7 +294,8 @@ describe("OTLP export", () => {
       .filter((l) => l.includes('"event.name":"server.stop"'))
       .map((l) => JSON.parse(l) as Record<string, unknown>)[0];
     expect(Number(stop["otlp.unexported"])).toBeGreaterThan(50);
-    expect(s.stderr()).toMatch(/audit: \d+ records were not exported to OTLP before shutdown/);
+    expect(Number(stop["otlp.lost"])).toBeGreaterThanOrEqual(Number(stop["otlp.unexported"]));
+    expect(s.stderr()).toMatch(/audit: \d+ records didn't reach the OTLP collector \(\d+ still unexported at shutdown\)/);
   }, 60_000);
 
   it("doesn't export with OTEL_LOGS_EXPORTER=none", async () => {
@@ -370,6 +371,60 @@ describe("OTLP export", () => {
       s.stop();
       await s.closed;
       expect(col.records.map((r) => r.eventName)).toContain("siglent.audit.server.stop");
+    } finally {
+      await col.close();
+    }
+  }, 60_000);
+
+  it("reports on the local sinks what failed in the final export, even with nothing left unexported", async () => {
+    const col = await collector();
+    col.state.fail = 400; // fails at once: nothing stays unexported, everything is lost
+    try {
+      const s = start({ OTEL_EXPORTER_OTLP_ENDPOINT: col.url, SIGLENT_AUDIT_LOG: "stderr" });
+      await s.init();
+      await s.call("scpi_query", { command: "*IDN?" });
+      s.stop();
+      expect(await s.closed).toBe(0);
+      const records = s
+        .stderr()
+        .split("\n")
+        .filter((l) => l.startsWith("{"))
+        .map((l) => JSON.parse(l) as Record<string, unknown>);
+      const stop = records.at(-1)!;
+      expect(stop["event.name"]).toBe("server.stop"); // still the last record
+      expect(Number(stop["otlp.unexported"])).toBe(0);
+      // Every record sent to the collector, server.stop's own OTLP copy included.
+      expect(Number(stop["otlp.lost"])).toBeGreaterThan(5);
+      expect(s.stderr()).toMatch(/records didn't reach the OTLP collector \(0 still unexported/);
+    } finally {
+      await col.close();
+    }
+  }, 60_000);
+
+  it("reports again the losses an audit.loss record carried when that record's export fails", async () => {
+    const col = await collector();
+    col.state.fail = 400;
+    try {
+      const s = start({ OTEL_EXPORTER_OTLP_ENDPOINT: col.url, SIGLENT_AUDIT_LOG: "off" });
+      await s.init();
+      // Several failing batches with records between them: the second batch
+      // carries an audit.loss for the first, and fails too.
+      for (let i = 0; i < 3; i++) {
+        await s.call("scpi_query", { command: "*IDN?" });
+        await new Promise((r) => setTimeout(r, 1300));
+      }
+      col.state.fail = 0;
+      await s.call("scpi_query", { command: "*IDN?" });
+      await new Promise((r) => setTimeout(r, 1300)); // exported, server still running
+      s.stop();
+      expect(await s.closed).toBe(0);
+      const seqs = col.records.map((x) => Number(x.attributes["audit.seq"]));
+      const missing = Math.max(...seqs) - new Set(seqs).size;
+      const reported = col.records
+        .filter((x) => x.eventName === "siglent.audit.audit.loss")
+        .reduce((n, x) => n + Number(x.attributes["audit.lost"]), 0);
+      expect(missing).toBeGreaterThan(0);
+      expect(reported).toBe(missing);
     } finally {
       await col.close();
     }

@@ -63,6 +63,11 @@ export interface AuditSink {
   write(record: AuditRecord): boolean;
   /** Records lost after they were accepted, since the last call. */
   takeLost?(): number;
+  /**
+   * Losses already counted and reported, whose report (an audit.loss record)
+   * was itself lost: to be reported again, without counting them twice.
+   */
+  takeUnreported?(): number;
   /** Wait until accepted records are written, or the timeout passes. */
   flush?(timeoutMs: number): Promise<boolean>;
   /** A write is stuck in the thread pool right now (see FdWriter.writeInFlight). */
@@ -211,8 +216,20 @@ export class Audit {
     }, { cause: "internal" });
   }
 
-  serverStop(reason: "stdin_closed" | "signal", extra: Record<string, AuditValue> = {}): void {
-    this.emit("security", "server.stop", { reason, ...extra }, { cause: "shutdown" }, (s) => ({ "audit.lost": s.lostTotal }));
+  /** server.stop, to every sink or only to those whose name passes `only`. */
+  serverStop(
+    reason: "stdin_closed" | "signal",
+    extra: Record<string, AuditValue> = {},
+    only?: (sinkName: string) => boolean
+  ): void {
+    this.emit(
+      "security",
+      "server.stop",
+      { reason, ...extra },
+      { cause: "shutdown" },
+      (s) => ({ "audit.lost": s.lostTotal }),
+      only
+    );
   }
 
   mcpRequest(
@@ -364,7 +381,8 @@ export class Audit {
     name: string,
     fields: Record<string, AuditValue | undefined>,
     ctx: AuditContext,
-    perSink?: (s: SinkState) => Record<string, AuditValue>
+    perSink?: (s: SinkState) => Record<string, AuditValue>,
+    only?: (sinkName: string) => boolean
   ): void {
     if (this.sinks.length === 0) return;
     const base: AuditRecord = {
@@ -381,6 +399,7 @@ export class Audit {
     }
     for (const s of this.sinks) {
       if (level === "full" && s.sink.level === "security") continue;
+      if (only && !only(s.sink.name)) continue;
       this.reportLoss(s, base);
       this.deliver(s, { ...base, ...perSink?.(s) });
     }
@@ -404,6 +423,8 @@ export class Audit {
       s.unreported += later;
       s.lostTotal += later;
     }
+    // Already in lostTotal: their earlier report didn't arrive.
+    s.unreported += s.sink.takeUnreported?.() ?? 0;
     if (s.unreported === 0) return;
     const lost = s.unreported;
     const record: AuditRecord = {

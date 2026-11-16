@@ -121,13 +121,31 @@ async function shutdown(reason: "stdin_closed" | "signal"): Promise<void> {
   // Drain first, so server.stop (last, with the final loss count) isn't
   // dropped by a queue that's still full from a stalled stderr.
   await audit.flush(1000);
-  // Records the collector hasn't taken yet won't arrive if the last flush
-  // doesn't deliver them: say so on the sinks that still work.
-  audit.serverStop(reason, otlp ? { "otlp.unexported": otlp.unexported } : {});
-  const drained = await audit.flush(1000);
-  if (otlp && otlp.unexported > 0) {
-    audit.log(`audit: ${otlp.unexported} records were not exported to OTLP before shutdown; they are lost.`);
-    await audit.flushStderr(500);
+  let drained: boolean;
+  if (otlp) {
+    // server.stop goes to the collector first. The local sinks get theirs
+    // after that final export, with the OTLP totals it settled, so losses in
+    // the final flush are reported too, on sinks that still work.
+    const sink = otlp;
+    audit.serverStop(reason, {}, (name) => name === sink.name);
+    await sink.flush(1000);
+    audit.serverStop(
+      reason,
+      { "otlp.lost": sink.lostTotal + sink.unexported, "otlp.unexported": sink.unexported },
+      (name) => name !== sink.name
+    );
+    drained = await audit.flush(1000);
+    const lost = sink.lostTotal + sink.unexported;
+    if (lost > 0) {
+      audit.log(
+        `audit: ${lost} records didn't reach the OTLP collector ` +
+          `(${sink.unexported} still unexported at shutdown); they are lost.`
+      );
+      await audit.flushStderr(500);
+    }
+  } else {
+    audit.serverStop(reason);
+    drained = await audit.flush(1000);
   }
   // process.exit joins the libuv thread pool, so it would wait for a write
   // stuck in the kernel (a hung network filesystem, a FIFO nobody reads)
