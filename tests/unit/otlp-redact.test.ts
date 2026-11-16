@@ -14,4 +14,10 @@ describe("OTLP redaction", () => {
     expect(out).not.toMatch(/pw|zzz|s3cret-token|abcd1234/);
     expect(out).toContain("https://***@c.example/v1/logs?***");
   });
+
+  it("removes the bare token of a 'Bearer <token>' header value, as a response body might echo it", () => {
+    const env = { OTEL_EXPORTER_OTLP_HEADERS: "authorization=Bearer%20secrettoken123" };
+    const out = redactText("invalid api key secrettoken123 (header was Bearer secrettoken123)", env);
+    expect(out).not.toContain("secrettoken123");
+  });
 });

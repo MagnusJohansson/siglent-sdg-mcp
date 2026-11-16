@@ -252,10 +252,16 @@ Where the implementation makes the design concrete or departs from it:
 - **OTLP export** (src/audit/otlp.ts):
   - The SDK is loaded with a dynamic `import()` only when an endpoint is set. The exporter reads the standard `OTEL_EXPORTER_OTLP_*` variables itself; the server only validates the endpoint (an invalid URL, or a scheme other than http/https, stops it at startup) and honours `OTEL_SDK_DISABLED`.
   - Only OTLP/HTTP with JSON payloads (`@opentelemetry/exporter-logs-otlp-http`). Another `OTEL_EXPORTER_OTLP_PROTOCOL` gets a startup note rather than being ignored silently.
-  - The sink counts its own queue: it refuses records once 2048 are waiting (the batch processor's capacity), so the processor never drops one silently. A wrapper around the exporter counts every record an export failed to deliver as lost; `takeLost()` reports them, so the `audit.seq` gaps of the `otlp` sink equal its losses.
+  - The sink counts its own queue: it refuses records once 2048 are waiting (the batch processor's capacity), so the processor never drops one silently. A wrapper around the exporter counts every record an export failed to deliver as lost (the exporter calls back exactly once per export; retries happen inside it). Records a collector rejects in a partial-success answer, which the SDK calls a success, are counted from its diagnostic warning. Records still unexported at shutdown can't be reported on the `otlp` sink itself, so `server.stop` carries `otlp.unexported` on every sink and stderr says how many were lost. With those three, the `otlp` sink's `audit.seq` gaps are accounted for, at the latest at shutdown.
+  - The SDK's global error handler is replaced: the default one JSON-serialises the whole error, including its stack and the collector's HTTP response body, which can echo the key. Only the message and status code are logged.
+  - Diagnostic and error lines are rate-limited: one per kind per minute, then a count of the suppressed ones.
+  - `OTEL_LOGS_EXPORTER` is honoured (`none` turns the export off; values other than `otlp` get a startup note). Because the generic `OTEL_EXPORTER_OTLP_ENDPOINT` also switches it on when inherited from the environment, the README says so and how to keep it off.
+  - The logged endpoint is the URL the exporter posts to: the generic endpoint with `/v1/logs` appended.
+  - Flushes queue behind each other: the SDK returns at once from a flush started while another runs, so without that, a shutdown during the startup check's flush could skip exporting `server.stop`.
   - The startup check runs in the background: `server.start` is flushed right away (up to 10 s), and if no export has succeeded by then, a warning goes to stderr. The server doesn't wait for the collector to start serving.
-  - The SDK's diagnostic logger (WARN and above) goes to `audit.log()`, with URL userinfo and query strings, and every configured header value, removed.
-  - `service.name`, `service.version` and `service.instance.id` are resource attributes, not record attributes; `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` override them.
+  - The SDK's diagnostic logger (WARN and above) goes to `audit.log()`, with URL userinfo and query strings, and every configured header value and each whitespace-separated part of it, removed.
+  - `service.name`, `service.version` and `service.instance.id` are resource attributes, not record attributes. `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` can override the name and version, but not the instance id, which joins the OTLP records to the local ones.
+  - Severity `WARN` also covers `mcp.malformed` and an `instrument.disconnect` caused by the socket.
   - An HTTP export doesn't use the thread pool, so the OTLP sink never makes shutdown kill the process.
 - **sdg has no idle close or reconnect,** so the idle-close test applies to sds only.
 

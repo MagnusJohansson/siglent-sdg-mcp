@@ -75,7 +75,8 @@ describe("OTLP export configuration", () => {
 
   it("uses OTEL_EXPORTER_OTLP_ENDPOINT, logged without userinfo, query or fragment", () => {
     const c = loadConfig({ OTEL_EXPORTER_OTLP_ENDPOINT: "https://user:pw@collector.example:4318/base?api_key=x#f" });
-    expect(c.otlp).toEqual({ endpoint: "https://collector.example:4318/base" });
+    // The exporter appends /v1/logs to the generic endpoint; the logged URL is the one it posts to.
+    expect(c.otlp).toEqual({ endpoint: "https://collector.example:4318/base/v1/logs" });
   });
 
   it("prefers OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", () => {
@@ -84,6 +85,15 @@ describe("OTLP export configuration", () => {
       OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: "http://b.example:4318/v1/logs",
     });
     expect(c.otlp?.endpoint).toBe("http://b.example:4318/v1/logs");
+  });
+
+  it("honours OTEL_LOGS_EXPORTER", () => {
+    const base = { OTEL_EXPORTER_OTLP_ENDPOINT: "http://a.example:4318" };
+    expect(loadConfig({ ...base, OTEL_LOGS_EXPORTER: "none" }).otlp).toBeUndefined();
+    expect(loadConfig({ ...base, OTEL_LOGS_EXPORTER: "otlp" }).otlp).toBeDefined();
+    const console = loadConfig({ ...base, OTEL_LOGS_EXPORTER: "console" });
+    expect(console.otlp).toBeUndefined();
+    expect(console.notes.join("\n")).toMatch(/OTEL_LOGS_EXPORTER=console is not supported/);
   });
 
   it("respects OTEL_SDK_DISABLED", () => {

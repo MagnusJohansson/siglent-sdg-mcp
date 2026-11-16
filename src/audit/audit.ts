@@ -151,6 +151,11 @@ export class Audit {
     if (options.stderr) this.stderr = options.stderr;
   }
 
+  /** Add a sink, keeping the other sinks' numbering. */
+  addSink(sink: AuditSink): void {
+    this.sinks.push({ sink, seq: 0, unreported: 0, lostTotal: 0 });
+  }
+
   /** Remove all sinks (tests). */
   reset(): void {
     this.sinks = [];
@@ -206,8 +211,8 @@ export class Audit {
     }, { cause: "internal" });
   }
 
-  serverStop(reason: "stdin_closed" | "signal"): void {
-    this.emit("security", "server.stop", { reason }, { cause: "shutdown" }, (s) => ({ "audit.lost": s.lostTotal }));
+  serverStop(reason: "stdin_closed" | "signal", extra: Record<string, AuditValue> = {}): void {
+    this.emit("security", "server.stop", { reason, ...extra }, { cause: "shutdown" }, (s) => ({ "audit.lost": s.lostTotal }));
   }
 
   mcpRequest(
@@ -336,6 +341,11 @@ export class Audit {
   /** Some sink, or stderr, has a write stuck in the thread pool. */
   get writeInFlight(): boolean {
     return (this.stderr?.writeInFlight ?? false) || this.sinks.some((s) => s.sink.writeInFlight?.() ?? false);
+  }
+
+  /** Wait for the human-readable stderr lines to drain, or the timeout to pass. */
+  flushStderr(timeoutMs: number): Promise<boolean> {
+    return this.stderr?.flush(timeoutMs) ?? Promise.resolve(true);
   }
 
   /** Wait for every sink and stderr to drain, or the timeout to pass. */

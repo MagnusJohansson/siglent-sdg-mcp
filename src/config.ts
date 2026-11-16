@@ -22,7 +22,11 @@ export interface ServerConfig {
 }
 
 export interface OtlpConfig {
-  /** The endpoint as it may be logged: no userinfo, query string or fragment. */
+  /**
+   * The URL the exporter posts to, as it may be logged: no userinfo, query
+   * string or fragment. OTEL_EXPORTER_OTLP_ENDPOINT gets /v1/logs appended,
+   * as the exporter does; OTEL_EXPORTER_OTLP_LOGS_ENDPOINT is used as-is.
+   */
   endpoint: string;
 }
 
@@ -34,6 +38,18 @@ export interface OtlpConfig {
  */
 function parseOtlp(env: NodeJS.ProcessEnv, notes: string[]): OtlpConfig | undefined {
   if ((env.OTEL_SDK_DISABLED ?? "").trim().toLowerCase() === "true") return undefined;
+  // OTEL_LOGS_EXPORTER chooses the logs exporter: "none" turns the export
+  // off, and only "otlp" is supported.
+  const exporters = (env.OTEL_LOGS_EXPORTER ?? "")
+    .split(",")
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean);
+  if (exporters.length > 0 && !exporters.includes("otlp")) {
+    if (!exporters.every((e) => e === "none")) {
+      notes.push(`OTEL_LOGS_EXPORTER=${env.OTEL_LOGS_EXPORTER} is not supported (only otlp); the audit log isn't exported.`);
+    }
+    return undefined;
+  }
   const name = (env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT ?? "").trim()
     ? "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"
     : (env.OTEL_EXPORTER_OTLP_ENDPOINT ?? "").trim()
@@ -57,6 +73,9 @@ function parseOtlp(env: NodeJS.ProcessEnv, notes: string[]): OtlpConfig | undefi
   url.password = "";
   url.search = "";
   url.hash = "";
+  if (name === "OTEL_EXPORTER_OTLP_ENDPOINT") {
+    url.pathname = `${url.pathname.replace(/\/+$/, "")}/v1/logs`;
+  }
   return { endpoint: url.toString() };
 }
 

@@ -31,14 +31,14 @@ function value(v: Record<string, unknown>): unknown {
 async function collector() {
   const records: Received[] = [];
   const headers: string[] = [];
-  const state = { fail: 0 };
+  const state = { fail: 0, failBody: "{}", rejected: 0 };
   const server = http.createServer((req, res) => {
     let body = "";
     req.on("data", (c: Buffer) => (body += c.toString()));
     req.on("end", () => {
       headers.push(String(req.headers["authorization"] ?? ""));
       if (state.fail) {
-        res.writeHead(state.fail).end("{}");
+        res.writeHead(state.fail).end(state.failBody);
         return;
       }
       const msg = JSON.parse(body) as {
@@ -63,7 +63,9 @@ async function collector() {
           }
         }
       }
-      res.writeHead(200, { "content-type": "application/json" }).end("{}");
+      res
+        .writeHead(200, { "content-type": "application/json" })
+        .end(state.rejected ? JSON.stringify({ partialSuccess: { rejectedLogRecords: state.rejected } }) : "{}");
     });
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
@@ -183,7 +185,7 @@ describe("OTLP export", () => {
       const s = start({ OTEL_EXPORTER_OTLP_ENDPOINT: col.url, SIGLENT_AUDIT_LOG: "off" });
       await s.init();
       await until(() => s.stderr().includes("the OTLP export to"));
-      expect(s.stderr()).toMatch(/isn't working.*events are counted as lost/);
+      expect(s.stderr()).toMatch(/isn't working.*records are counted as lost/);
       // Tool calls carry on while the export fails.
       const r = (await s.call("scpi_query", { command: "*IDN?" })) as { result?: { isError?: boolean } };
       expect(r.result?.isError).toBeFalsy();
@@ -217,4 +219,105 @@ describe("OTLP export", () => {
     expect(await s.closed).toBe(1);
     expect(s.stderr()).toContain("OTEL_EXPORTER_OTLP_ENDPOINT is not a valid URL");
   });
+
+  it("never logs the key, a stack or a response body when the collector echoes the key in an error", async () => {
+    const col = await collector();
+    col.state.fail = 401;
+    col.state.failBody = "invalid api key secrettoken123 (header was Bearer secrettoken123)";
+    try {
+      const s = start({
+        OTEL_EXPORTER_OTLP_ENDPOINT: col.url,
+        OTEL_EXPORTER_OTLP_HEADERS: "authorization=Bearer%20secrettoken123",
+      });
+      await s.init();
+      for (let i = 0; i < 5; i++) {
+        await s.call("scpi_query", { command: "*IDN?" });
+        await new Promise((r) => setTimeout(r, 400)); // several failing exports
+      }
+      s.stop();
+      await s.closed;
+      const err = s.stderr();
+      expect(err).toContain("otlp: export failed: Unauthorized (status 401)");
+      expect(err).not.toContain("secrettoken123");
+      expect(err).not.toMatch(/invalid api key|"stack"|\n\s+at /);
+      // Rate-limited: one line per minute, however many exports fail.
+      expect(err.match(/otlp: export failed/g)?.length).toBe(1);
+    } finally {
+      await col.close();
+    }
+  }, 60_000);
+
+  it("counts records a collector rejects in a partial-success answer as lost", async () => {
+    const col = await collector();
+    col.state.rejected = 2;
+    try {
+      const s = start({ OTEL_EXPORTER_OTLP_ENDPOINT: col.url, SIGLENT_AUDIT_LOG: "off" });
+      await s.init();
+      await until(() => s.stderr().includes("rejected 2 records"));
+      col.state.rejected = 0;
+      await s.call("scpi_query", { command: "*IDN?" });
+      s.stop();
+      expect(await s.closed).toBe(0);
+      const reported = col.records
+        .filter((x) => x.eventName === "siglent.audit.audit.loss")
+        .reduce((n, x) => n + Number(x.attributes["audit.lost"]), 0);
+      expect(reported).toBeGreaterThanOrEqual(2);
+      expect(reported % 2).toBe(0);
+    } finally {
+      await col.close();
+    }
+  }, 60_000);
+
+  it("reports the records it couldn't export before shutdown, on the sinks that still work", async () => {
+    const col = await collector();
+    const url = col.url;
+    await col.close(); // nothing listens there now
+    const s = start({ OTEL_EXPORTER_OTLP_ENDPOINT: url, SIGLENT_AUDIT_LOG: "stderr" });
+    await s.init();
+    for (let i = 0; i < 20; i++) await s.call("scpi_query", { command: "*IDN?" });
+    s.stop();
+    expect(await s.closed).toBe(0);
+    const stop = s
+      .stderr()
+      .split("\n")
+      .filter((l) => l.includes('"event.name":"server.stop"'))
+      .map((l) => JSON.parse(l) as Record<string, unknown>)[0];
+    expect(Number(stop["otlp.unexported"])).toBeGreaterThan(50);
+    expect(s.stderr()).toMatch(/audit: \d+ records were not exported to OTLP before shutdown/);
+  }, 60_000);
+
+  it("doesn't export with OTEL_LOGS_EXPORTER=none", async () => {
+    const col = await collector();
+    try {
+      const s = start({ OTEL_EXPORTER_OTLP_ENDPOINT: col.url, OTEL_LOGS_EXPORTER: "none" });
+      await s.init();
+      s.stop();
+      await s.closed;
+      expect(col.records).toEqual([]);
+    } finally {
+      await col.close();
+    }
+  }, 60_000);
+
+  it("keeps its own service.instance.id, so OTLP records join the local ones", async () => {
+    const col = await collector();
+    try {
+      const s = start({
+        OTEL_EXPORTER_OTLP_ENDPOINT: col.url,
+        OTEL_RESOURCE_ATTRIBUTES: "service.instance.id=fixed,deployment.environment=bench",
+        OTEL_SERVICE_NAME: "bench-sdg",
+      });
+      await s.init();
+      s.stop();
+      await s.closed;
+      const local = JSON.parse(s.stderr().split("\n").find((l) => l.includes('"server.start"'))!) as Record<string, unknown>;
+      expect(col.records[0].resource).toMatchObject({
+        "service.instance.id": local["service.instance.id"],
+        "service.name": "bench-sdg",
+        "deployment.environment": "bench",
+      });
+    } finally {
+      await col.close();
+    }
+  }, 60_000);
 });

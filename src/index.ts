@@ -49,7 +49,7 @@ if (config.otlp) {
       service: { name: "siglent-sdg-mcp", version: SERVER_VERSION, instanceId: audit.instanceId },
       log: (message) => audit.log(message),
     });
-    audit.configure({ sinks: [...sinks, otlp] });
+    audit.addSink(otlp);
   } catch (err) {
     logSync(`Configuration error: can't start the OTLP export: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
@@ -87,11 +87,15 @@ if (otlp && config.otlp) {
   const sink = otlp;
   const endpoint = config.otlp.endpoint;
   void sink.flush(10_000).then(() => {
-    if (sink.status.exportsOk === 0) {
+    if (sink.status.delivered === 0) {
+      const why = sink.status.lastError
+        ? sink.status.lastError
+        : sink.status.rejected > 0
+          ? "the collector rejected every record"
+          : "no answer within 10 s";
       audit.log(
-        `audit: the OTLP export to ${endpoint} isn't working` +
-          (sink.status.lastError ? ` (${sink.status.lastError})` : " (no answer yet)") +
-          "; events are counted as lost until it does."
+        `audit: the OTLP export to ${endpoint} isn't working (${why}); ` +
+          "records are counted as lost until it does."
       );
     }
   });
@@ -117,8 +121,14 @@ async function shutdown(reason: "stdin_closed" | "signal"): Promise<void> {
   // Drain first, so server.stop (last, with the final loss count) isn't
   // dropped by a queue that's still full from a stalled stderr.
   await audit.flush(1000);
-  audit.serverStop(reason);
+  // Records the collector hasn't taken yet won't arrive if the last flush
+  // doesn't deliver them: say so on the sinks that still work.
+  audit.serverStop(reason, otlp ? { "otlp.unexported": otlp.unexported } : {});
   const drained = await audit.flush(1000);
+  if (otlp && otlp.unexported > 0) {
+    audit.log(`audit: ${otlp.unexported} records were not exported to OTLP before shutdown; they are lost.`);
+    await audit.flushStderr(500);
+  }
   // process.exit joins the libuv thread pool, so it would wait for a write
   // stuck in the kernel (a hung network filesystem, a FIFO nobody reads)
   // without any time limit. What's still queued is lost either way.
