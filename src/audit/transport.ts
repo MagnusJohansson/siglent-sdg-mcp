@@ -36,6 +36,12 @@ interface Pending {
 type MessageHandler = NonNullable<Transport["onmessage"]>;
 
 /**
+ * The key for a request id, by type and value, as the SDK matches them: a
+ * response or cancel for "7" is not one for 7.
+ */
+const idKey = (id: unknown): string => `${typeof id}:${String(id)}`;
+
+/**
  * How the SDK reports a schema failure: a tool error that starts with exactly
  * this, then the tool's name (SDK 1.32, pinned by the contract test). Only the
  * start is matched: many tool errors repeat their input, so a substring match
@@ -73,10 +79,13 @@ export function auditTransport(transport: Transport, options: TransportAuditOpti
         // at the call's own level, so the default log shows how it ended. Its
         // instrument writes may still complete; the full trail shows them.
         if (method === "notifications/cancelled") {
+          // Exactly the SDK's rule (Protocol._oncancel): a falsy requestId is
+          // ignored, and the id matches by type and value. Anything the SDK
+          // won't cancel still gets its real response, logged as usual.
           const id = (m.params as { requestId?: unknown } | undefined)?.requestId;
-          const p = id !== undefined ? pending.get(String(id)) : undefined;
+          const p = id ? pending.get(idKey(id)) : undefined;
           if (p) {
-            pending.delete(String(id));
+            pending.delete(idKey(id));
             audit.mcpResponse(p.level, {
               method: p.method,
               tool: p.tool,
@@ -114,7 +123,7 @@ export function auditTransport(transport: Transport, options: TransportAuditOpti
     const level: AuditLevel =
       tool !== undefined && (audit.isStateChanging(tool) || disabledRaw) ? "security" : "full";
     const args = tool !== undefined ? boundArguments(m.params?.arguments) : undefined;
-    pending.set(String(m.id), { method: bound(method, 128), tool, level, startedAt: Date.now() });
+    pending.set(idKey(m.id), { method: bound(method, 128), tool, level, startedAt: Date.now() });
     audit.mcpRequest(level, {
       method: bound(method, 128),
       tool,
@@ -159,9 +168,9 @@ export function auditTransport(transport: Transport, options: TransportAuditOpti
     result?: { isError?: boolean; content?: unknown };
     error?: { code?: number; message?: string };
   }): void => {
-    const p = m.id !== undefined ? pending.get(String(m.id)) : undefined;
+    const p = m.id !== undefined ? pending.get(idKey(m.id)) : undefined;
     if (p && ("result" in m || "error" in m)) {
-      pending.delete(String(m.id));
+      pending.delete(idKey(m.id));
       const ctx: AuditContext = { requestId: bound(String(m.id), 128), cause: "tool-call" };
       const durationMs = Date.now() - p.startedAt;
       if (m.error) {

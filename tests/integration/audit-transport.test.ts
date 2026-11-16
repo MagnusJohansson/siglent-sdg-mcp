@@ -94,6 +94,29 @@ describe("transport hooks on the stdio transport (SDK contract)", () => {
     expect(String(deepReq?.["gen_ai.tool.call.arguments"])).toMatch(/^\[arguments not logged/);
     expect(sink.events("mcp.response").some((r) => r["jsonrpc.request.id"] === "11")).toBe(true);
 
+    // Cancellation follows the SDK's rule exactly. Each call and its cancel go
+    // in one write, so the cancel is handled before the call completes.
+    const line = (o: unknown) => JSON.stringify(o) + "\n";
+    const callAndCancel = (id: string | number, cancelId: string | number) =>
+      stdin.write(
+        line({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "get_output", arguments: { channel: "C1" } } }) +
+          line({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: cancelId } })
+      );
+    const outcomes = (id: string) =>
+      sink.events("mcp.response").filter((r) => r["jsonrpc.request.id"] === id).map((r) => r["outcome"]);
+    // Cancelled by the SDK: no response is sent, and the log says cancelled.
+    callAndCancel(5, 5);
+    // Not cancelled by the SDK (it ignores requestId 0, and "7" isn't 7): the
+    // call is answered, and the log has its real outcome, not "cancelled".
+    callAndCancel(0, 0);
+    callAndCancel(7, "7");
+    expect(await waitFor("0")).toBeDefined();
+    expect(await waitFor("7")).toBeDefined();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(outcomes("5")).toEqual(["cancelled"]);
+    expect(outcomes("0")).toEqual(["tool_error"]); // "Not connected"
+    expect(outcomes("7")).toEqual(["tool_error"]);
+
     await server.close();
   });
 });
