@@ -61,7 +61,14 @@ function parseOtlp(env: NodeJS.ProcessEnv, notes: string[]): OtlpConfig | undefi
     : (env.OTEL_EXPORTER_OTLP_ENDPOINT ?? "").trim()
       ? "OTEL_EXPORTER_OTLP_ENDPOINT"
       : undefined;
-  if (!name) return undefined;
+  if (!name) {
+    // Asked for an off-machine trail without saying where: fail closed
+    // rather than start without it.
+    if (isTrue(env.SIGLENT_AUDIT_OTLP)) {
+      throw new Error("SIGLENT_AUDIT_OTLP=1 needs OTEL_EXPORTER_OTLP_ENDPOINT or OTEL_EXPORTER_OTLP_LOGS_ENDPOINT.");
+    }
+    return undefined;
+  }
   if (name === "OTEL_EXPORTER_OTLP_ENDPOINT" && !isTrue(env.SIGLENT_AUDIT_OTLP)) {
     notes.push(
       "OTEL_EXPORTER_OTLP_ENDPOINT is set, but the audit log isn't exported: set SIGLENT_AUDIT_OTLP=1 " +

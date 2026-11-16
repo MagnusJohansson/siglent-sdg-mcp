@@ -88,6 +88,12 @@ describe("OTLP export configuration", () => {
     expect(loadConfig({ OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: "http://a.example:4318/v1/logs" }).otlp).toBeDefined();
   });
 
+  it("fails closed on the opt-in without an endpoint, unless the export is switched off", () => {
+    expect(() => loadConfig({ SIGLENT_AUDIT_OTLP: "1" })).toThrow(/SIGLENT_AUDIT_OTLP=1 needs OTEL_EXPORTER_OTLP_ENDPOINT/);
+    expect(loadConfig({ SIGLENT_AUDIT_OTLP: "1", OTEL_LOGS_EXPORTER: "none" }).otlp).toBeUndefined();
+    expect(loadConfig({ SIGLENT_AUDIT_OTLP: "1", OTEL_SDK_DISABLED: "true" }).otlp).toBeUndefined();
+  });
+
   it("prefers OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", () => {
     const c = loadConfig({
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://a.example:4318",

@@ -119,7 +119,7 @@ Replace `/path/to/siglent-sdg-mcp` with the actual path to your clone.
 | `SIGLENT_PORT` | No | `5025` | Fallback if `SIGLENT_SDG_PORT` is not set |
 | `SIGLENT_ALLOWED_HOSTS` | No | — | Comma-separated hosts the `connect` tool may use, in addition to `SIGLENT_SDG_IP`. `*` allows any host (not recommended). See [Security](#security) |
 | `SIGLENT_ALLOW_RAW_SCPI` | No | `false` | Register the raw `scpi_command` tool. Requires `SIGLENT_SDG_IP` or `SIGLENT_ALLOWED_HOSTS` naming specific hosts (`*` is not accepted) |
-| `SIGLENT_AUDIT_OTLP` | No | — | `1` to export the audit log to the collector in `OTEL_EXPORTER_OTLP_ENDPOINT`. Not needed with `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`. See [Exporting to OpenTelemetry](#exporting-to-opentelemetry) |
+| `SIGLENT_AUDIT_OTLP` | No | — | `1` to export the audit log to the collector in `OTEL_EXPORTER_OTLP_ENDPOINT`. Not needed with `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`. Without either endpoint, the server refuses to start. See [Exporting to OpenTelemetry](#exporting-to-opentelemetry) |
 | `SIGLENT_AUDIT_LOG` | No | security events on stderr | `stderr` for the full audit trail on stderr, an absolute file path for the full trail in that file, or `off`. See [Audit log](#audit-log) |
 
 ### Auto-Connect Behavior
