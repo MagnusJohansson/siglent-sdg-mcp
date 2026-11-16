@@ -66,7 +66,7 @@ The image runs the server as an unprivileged user (`node`, UID 1000) and contain
 
 ### Option B: npx
 
-Requires Node.js 20+. Downloads and runs the package automatically.
+Requires Node.js 22.15 or later. Downloads and runs the package automatically.
 
 ```json
 {
@@ -119,6 +119,7 @@ Replace `/path/to/siglent-sdg-mcp` with the actual path to your clone.
 | `SIGLENT_PORT` | No | `5025` | Fallback if `SIGLENT_SDG_PORT` is not set |
 | `SIGLENT_ALLOWED_HOSTS` | No | — | Comma-separated hosts the `connect` tool may use, in addition to `SIGLENT_SDG_IP`. `*` allows any host (not recommended). See [Security](#security) |
 | `SIGLENT_ALLOW_RAW_SCPI` | No | `false` | Register the raw `scpi_command` tool. Requires `SIGLENT_SDG_IP` or `SIGLENT_ALLOWED_HOSTS` naming specific hosts (`*` is not accepted) |
+| `SIGLENT_AUDIT_OTLP` | No | — | `1` to export the audit log to the collector in `OTEL_EXPORTER_OTLP_ENDPOINT`. Not needed with `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`. Without either endpoint, the server refuses to start. See [Exporting to OpenTelemetry](#exporting-to-opentelemetry) |
 | `SIGLENT_AUDIT_LOG` | No | security events on stderr | `stderr` for the full audit trail on stderr, an absolute file path for the full trail in that file, or `off`. See [Audit log](#audit-log) |
 
 ### Auto-Connect Behavior
@@ -420,7 +421,31 @@ A refused query looks like this (shortened):
 - **Refusals have stable rule ids** (`query.not_a_query`, `wire.compound`, `schema.invalid`, `raw.disabled`, `host.not_allowed`, ...), so they can be counted and alerted on without parsing messages.
 - **Losses are visible.** Each sink numbers its records (`audit.seq`) without gaps; a missing number is a lost record, and an `audit.loss` event reports the count once the sink accepts records again. The server never waits for the log: if stderr is a pipe nobody reads, records are dropped and counted, and tool calls carry on. If a write is stuck in the kernel at shutdown (a file on a hung network filesystem), the server ends itself with SIGKILL after about 2 s rather than hanging; that shows as status 137, without a final `server.stop`.
 - **What's logged:** tool arguments and the generator's text replies, each cut at 512 characters. Tool results are summarised as types and sizes, not copied. The instrument's `*IDN?` reply includes its serial number. Nothing from the environment is logged beyond the effective configuration.
-- **What it can't do:** the log records an honest server's activity. A compromised server process could rewrite the file, forge events or send commands without logging them; the log lives on the same machine, under the same user. There's no caller identity in stdio mode: the client's name is recorded as self-reported. Shipping the log off the machine over OpenTelemetry is planned; see [docs/audit-log-design.md](docs/audit-log-design.md).
+- **What it can't do:** a local log records an honest server's activity. A compromised server process could rewrite the file, forge events or send commands without logging them; the file lives on the same machine, under the same user. Exporting to a collector (below) keeps a copy the process can't change afterwards. There's no caller identity in stdio mode: the client's name is recorded as self-reported. The design is in [docs/audit-log-design.md](docs/audit-log-design.md).
+
+### Exporting to OpenTelemetry
+
+The server can also export the full trail as OTLP log records, over HTTP with JSON payloads, to a collector or any backend that accepts OTLP. It's opt-in: set `SIGLENT_AUDIT_OTLP=1` together with the standard endpoint, or use the logs-specific `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, which is the opt-in on its own:
+
+```json
+"env": {
+  "SIGLENT_SDG_IP": "192.168.1.126",
+  "SIGLENT_AUDIT_OTLP": "1",
+  "OTEL_EXPORTER_OTLP_ENDPOINT": "https://otlp.example.com:4318",
+  "OTEL_EXPORTER_OTLP_HEADERS": "authorization=Bearer <ingest-only key>"
+}
+```
+
+- **Why the opt-in:** the generic `OTEL_EXPORTER_OTLP_ENDPOINT` is often inherited from an environment set up for another application's telemetry, and the audit trail carries tool arguments and the instrument's serial number. On its own it only gets a startup note. `OTEL_LOGS_EXPORTER=none` or `OTEL_SDK_DISABLED=true` keeps the export off in any case. `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` is used as-is; the generic endpoint gets `/v1/logs` appended, and the server logs the URL it posts to.
+- The export is independent of `SIGLENT_AUDIT_LOG`: with `SIGLENT_AUDIT_LOG=off` it's the only copy. `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` work as usual, except that `service.instance.id` stays the server's own, so exported records join the local ones. Other protocols (`grpc`, `http/protobuf`) and other `OTEL_LOGS_EXPORTER` values aren't supported; the server says so at startup.
+- Each record's event name is `siglent.audit.<event>` (for example `siglent.audit.guard.refused`), refusals and failures are `WARN`, and the fields above are attributes. Attribute names follow the OpenTelemetry conventions where one exists (`gen_ai.tool.name`, `mcp.method.name`, `server.address`); the MCP conventions are still at Development status, so a name may change, and the CHANGELOG will say so.
+- **An invalid endpoint stops the server at startup.** An unreachable or failing collector doesn't: tool calls carry on, and the server warns on stderr (once, then at most once a minute). Records a failed export didn't deliver, and records a collector rejects in a "partial success" answer, are counted and reported with `audit.loss` once the export works again. At shutdown, `server.stop` goes to the collector first; the local sinks get theirs after that final export, carrying `otlp.lost` (every record that didn't reach the collector) and `otlp.unexported` (those still waiting), and stderr says how many were lost.
+- **What can be lost:** with a healthy collector, about a second's worth of records not yet exported. While the collector is failing or unreachable, everything still queued, up to 2048 records, plus what a retrying export holds. Losses are counted, not silent, but the records themselves are gone.
+- **What the export protects:** records exported before a compromise can't be changed by the compromised process, provided the backend is append-only and the key can only ingest, not delete or query. Use such a key. After a compromise the process holds that key, so it could stop exporting or send forged records.
+- **The key isn't logged:** it's sent only as the configured header, and the logged endpoint has no userinfo or query string. The exporter's own errors are logged as a message and status code only, never with the collector's response body or a stack trace, and every configured header value (and each part of it, such as the token in `Bearer <token>`) is removed from them.
+- The exporter adds 11 packages, all from the OpenTelemetry project. They're loaded only when an endpoint is set.
+
+In Docker, pass the key by name, so its value comes from the client's environment and isn't written into the MCP config, where `docker inspect` and `ps` would show it: `"-e", "OTEL_EXPORTER_OTLP_HEADERS"` (or use `--env-file`).
 
 **Docker:** stderr works unchanged with `--read-only`. A file needs a mounted directory that UID 1000 can write: add `"-v", "/host/audit:/audit", "-e", "SIGLENT_AUDIT_LOG=/audit/sdg.jsonl"` to the `docker run` arguments. On Linux the file then belongs to UID 1000 with mode `0600`, so only that user (or root) can read it on the host; add `"--user", "<your uid>:<your gid>"` to run the server as your own user instead (still not root). Docker Desktop on macOS and Windows maps ownership to your user.
 

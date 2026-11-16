@@ -17,6 +17,86 @@ export interface ServerConfig {
   /** Human-readable notes about the effective configuration, logged at startup. */
   notes: string[];
   audit: AuditConfig;
+  /** OTLP export of the full audit trail, when an endpoint is configured. */
+  otlp?: OtlpConfig;
+}
+
+export interface OtlpConfig {
+  /**
+   * The URL the exporter posts to, as it may be logged: no userinfo, query
+   * string or fragment. OTEL_EXPORTER_OTLP_ENDPOINT gets /v1/logs appended,
+   * as the exporter does; OTEL_EXPORTER_OTLP_LOGS_ENDPOINT is used as-is.
+   */
+  endpoint: string;
+}
+
+/**
+ * The exporter reads the standard variables itself (endpoint, headers,
+ * timeout). Here the server decides whether to export at all, checks the
+ * endpoint (an invalid URL is a configuration error) and the protocol: it
+ * sends OTLP/HTTP with JSON payloads.
+ *
+ * Opt-in: the generic OTEL_EXPORTER_OTLP_ENDPOINT is often inherited from an
+ * environment set up for another application's telemetry, and the audit
+ * trail carries tool arguments and the instrument's serial number. So the
+ * export needs SIGLENT_AUDIT_OTLP=1, or the logs-specific
+ * OTEL_EXPORTER_OTLP_LOGS_ENDPOINT; the generic endpoint alone gets a note.
+ */
+function parseOtlp(env: NodeJS.ProcessEnv, notes: string[]): OtlpConfig | undefined {
+  if ((env.OTEL_SDK_DISABLED ?? "").trim().toLowerCase() === "true") return undefined;
+  // OTEL_LOGS_EXPORTER chooses the logs exporter: "none" turns the export
+  // off, and only "otlp" is supported.
+  const exporters = (env.OTEL_LOGS_EXPORTER ?? "")
+    .split(",")
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean);
+  if (exporters.length > 0 && !exporters.includes("otlp")) {
+    if (!exporters.every((e) => e === "none")) {
+      notes.push(`OTEL_LOGS_EXPORTER=${env.OTEL_LOGS_EXPORTER} is not supported (only otlp); the audit log isn't exported.`);
+    }
+    return undefined;
+  }
+  const name = (env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT ?? "").trim()
+    ? "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"
+    : (env.OTEL_EXPORTER_OTLP_ENDPOINT ?? "").trim()
+      ? "OTEL_EXPORTER_OTLP_ENDPOINT"
+      : undefined;
+  if (!name) {
+    // Asked for an off-machine trail without saying where: fail closed
+    // rather than start without it.
+    if (isTrue(env.SIGLENT_AUDIT_OTLP)) {
+      throw new Error("SIGLENT_AUDIT_OTLP=1 needs OTEL_EXPORTER_OTLP_ENDPOINT or OTEL_EXPORTER_OTLP_LOGS_ENDPOINT.");
+    }
+    return undefined;
+  }
+  if (name === "OTEL_EXPORTER_OTLP_ENDPOINT" && !isTrue(env.SIGLENT_AUDIT_OTLP)) {
+    notes.push(
+      "OTEL_EXPORTER_OTLP_ENDPOINT is set, but the audit log isn't exported: set SIGLENT_AUDIT_OTLP=1 " +
+        "(or OTEL_EXPORTER_OTLP_LOGS_ENDPOINT) to export it."
+    );
+    return undefined;
+  }
+  let url: URL;
+  try {
+    url = new URL(env[name]!.trim());
+  } catch {
+    throw new Error(`${name} is not a valid URL.`);
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error(`${name} must be an http:// or https:// URL.`);
+  }
+  const protocol = (env.OTEL_EXPORTER_OTLP_LOGS_PROTOCOL ?? env.OTEL_EXPORTER_OTLP_PROTOCOL ?? "").trim();
+  if (protocol && protocol !== "http/json") {
+    notes.push(`OTEL_EXPORTER_OTLP_PROTOCOL=${protocol} is not supported; audit events are exported as OTLP/HTTP with JSON.`);
+  }
+  url.username = "";
+  url.password = "";
+  url.search = "";
+  url.hash = "";
+  if (name === "OTEL_EXPORTER_OTLP_ENDPOINT") {
+    url.pathname = `${url.pathname.replace(/\/+$/, "")}/v1/logs`;
+  }
+  return { endpoint: url.toString() };
 }
 
 /**
@@ -98,5 +178,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     rawScpiEnabled,
     notes,
     audit: parseAudit(env.SIGLENT_AUDIT_LOG),
+    otlp: parseOtlp(env, notes),
   };
 }
