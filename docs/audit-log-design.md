@@ -1,6 +1,6 @@
 # Design: audit log and OpenTelemetry export
 
-**Status:** revision 4, after three design reviews; decisions confirmed. **Implemented in siglent-sdg-mcp 2.1.0**, both the JSONL audit log and the OpenTelemetry export (see "Implementation notes"); siglent-sds-mcp follows. The same document is in both repositories.
+**Status:** revision 4, after three design reviews; decisions confirmed. **Implemented in siglent-sdg-mcp 2.1.0 and siglent-sds-mcp 2.1.0**, both the JSONL audit log and the OpenTelemetry export (see "Implementation notes"). The same document is in both repositories.
 
 ## Problem
 
@@ -264,6 +264,22 @@ Where the implementation makes the design concrete or departs from it:
   - Severity `WARN` also covers `mcp.malformed` and an `instrument.disconnect` caused by the socket.
   - An HTTP export doesn't use the thread pool, so the OTLP sink never makes shutdown kill the process.
 - **sdg has no idle close or reconnect,** so the idle-close test applies to sds only.
+
+## Implementation notes (siglent-sds-mcp 2.1.0)
+
+The scope server follows the siglent-sdg-mcp implementation above, module for module (`src/audit/` is the same code). What differs is the connection:
+
+- **The ambient context** is read at the start of the public `connect`, `disconnect`, `sendCommand`, `query`, `queryBinary` and `checkChannel`. Everything else, `ensureReady`'s reconnect included, gets an explicit context.
+- **Reconnect:** `ensureReady` reconnects with the id of the call that needed the connection and `cause: reconnect`; the reconnect's own `CHDR OFF` and `*IDN?` carry it too.
+- **Idle close:** `cause: idle-close`, no request id (the idle timer is scheduled from the last query's completion, so its ambient context would be that call's).
+- **Resets:** after a timeout (`reset_after_timeout`) or an out-of-step reply (`reset_out_of_step`), with `cause: reset` and the id of the call whose query caused it.
+- **Setter writes:** a setter paced by `*OPC?` is two writes with two ids allocated at enqueue: the setter (`scpi.kind: command`) and the `*OPC?` (`opc`). The setter's result is recorded when its write completes. If the connection resets during the 20 ms gap, the skipped `*OPC?` has no `scpi.write` and its result is `not_written`; a timeout in that gap is recorded as `not_written` too. An out-of-step reply gives the `*OPC?` the outcome `out_of_step`.
+- **Binary queries** (`get_waveform`, `screenshot`) are `binary-query` writes, logged by size only.
+- **"superseded"** means a newer connect cut the attempt short (the socket connected after a newer attempt started, or the handshake was interrupted by one). An attempt that was refused or timed out on its own is `failed`, even if a newer one had started.
+- **Defence in depth:** a query settles once, and a write error that arrives after its query ended is ignored. No path reaching either was found in review; they keep "one result per write id" from depending on that.
+- **Known, unchanged behaviour:** after a write error, the write callback drains the queue before the socket's error event, so the next queued line can be written into the dying socket. The log shows that write, with the result `connection_closed`. It's the existing resilience behaviour and isn't changed here.
+- **Rules:** the scope adds `query.read_and_clear`, `binary.not_allowed`, `command.is_query` and `command.returns_data`; `wire.too_long` and `binary.not_allowed` aren't reachable through the tools (their schemas cap commands at 512 characters, and binary queries are fixed), only through the connection.
+- **The hardware check** runs three server sessions (default, raw SCPI, restore), all writing to one audit file; the oracle waits for all their `server.stop` records.
 
 ## Decisions
 
