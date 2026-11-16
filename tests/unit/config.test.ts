@@ -67,3 +67,35 @@ describe("SIGLENT_AUDIT_LOG", () => {
     expect(() => loadConfig({ SIGLENT_AUDIT_LOG: value })).toThrow(/SIGLENT_AUDIT_LOG/);
   });
 });
+
+describe("OTLP export configuration", () => {
+  it("is off without an endpoint", () => {
+    expect(loadConfig({}).otlp).toBeUndefined();
+  });
+
+  it("uses OTEL_EXPORTER_OTLP_ENDPOINT, logged without userinfo, query or fragment", () => {
+    const c = loadConfig({ OTEL_EXPORTER_OTLP_ENDPOINT: "https://user:pw@collector.example:4318/base?api_key=x#f" });
+    expect(c.otlp).toEqual({ endpoint: "https://collector.example:4318/base" });
+  });
+
+  it("prefers OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", () => {
+    const c = loadConfig({
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://a.example:4318",
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: "http://b.example:4318/v1/logs",
+    });
+    expect(c.otlp?.endpoint).toBe("http://b.example:4318/v1/logs");
+  });
+
+  it("respects OTEL_SDK_DISABLED", () => {
+    expect(loadConfig({ OTEL_EXPORTER_OTLP_ENDPOINT: "http://a.example:4318", OTEL_SDK_DISABLED: "true" }).otlp).toBeUndefined();
+  });
+
+  it.each(["not a url", "ftp://a.example/", "localhost:4318"])("fails closed on the endpoint %s", (value) => {
+    expect(() => loadConfig({ OTEL_EXPORTER_OTLP_ENDPOINT: value })).toThrow(/OTEL_EXPORTER_OTLP_ENDPOINT/);
+  });
+
+  it("notes an unsupported protocol instead of ignoring it silently", () => {
+    const c = loadConfig({ OTEL_EXPORTER_OTLP_ENDPOINT: "http://a.example:4318", OTEL_EXPORTER_OTLP_PROTOCOL: "grpc" });
+    expect(c.notes.join("\n")).toMatch(/grpc is not supported/);
+  });
+});

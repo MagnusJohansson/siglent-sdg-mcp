@@ -10,6 +10,7 @@
   - Refusals the SDK makes before a tool runs are recorded too: arguments that fail the tool's schema (`schema.invalid`, e.g. a newline in `load`) and calls to `scpi_command` while it's disabled (`raw.disabled`). Lines that aren't valid JSON-RPC are recorded as `mcp.malformed`.
   - Every event carries the JSON-RPC request id of the call that caused it, including instrument writes made later from the query queue. A cancelled call is closed with `outcome: cancelled`.
   - Each sink numbers its records without gaps; lost records are counted and reported with `audit.loss` (and a warning on stderr) once the sink accepts records again.
+- **OpenTelemetry export.** With the standard `OTEL_EXPORTER_OTLP_ENDPOINT` (or `..._LOGS_ENDPOINT`) set, the full audit trail is also exported as OTLP log records over HTTP with JSON payloads, independent of `SIGLENT_AUDIT_LOG`. Event names are `siglent.audit.<event>`; refusals and failures are `WARN`. An invalid endpoint stops the server at startup; a failing collector doesn't, but the server warns on stderr and counts the records that didn't arrive, reporting them with `audit.loss` once the export works. The key in `OTEL_EXPORTER_OTLP_HEADERS` is never logged: the logged endpoint has no userinfo or query string, and the exporter's diagnostic messages are redacted. Adds 11 dependencies, all from the OpenTelemetry project (`@opentelemetry/api`, `api-logs`, `sdk-logs`, `exporter-logs-otlp-http`, `resources` and what they pull in), loaded only when an endpoint is set.
 - `ScpiPolicyError` carries a stable `rule` id (`query.not_a_query`, `wire.compound`, `host.not_allowed`, ...).
 
 ### Changed
@@ -21,6 +22,7 @@
 
 ### Tests
 
+- OTLP tests run the server process against a local HTTP server standing in for a collector: the exported records, their names, severities, attributes and resource, the flush on shutdown, the export-only mode, losses while the collector rejects exports and their report once it accepts them, an invalid endpoint, and that the key appears in no record and no stderr line.
 - Audit tests run the MCP server against the simulator and check attribution with parallel calls, after a timeout and when a disconnect cuts queued queries off, the per-sink numbering, bounded strings, and that every rule id is produced. A contract test pins the SDK behaviours the transport hooks rely on. Process tests check that stdout stays JSON-RPC, shutdown on stdin end and SIGTERM, the file mode, fail-closed startup, and that 2,000 tool calls complete with stderr unread.
 - The hardware check drains the server's stderr and uses the audit log as a second oracle: every security probe must be recorded as `guard.refused` with its expected rule, and no probe's payload may appear in any instrument write.
 

@@ -1,6 +1,6 @@
 # Design: audit log and OpenTelemetry export
 
-**Status:** revision 4, after three design reviews; decisions confirmed. The JSONL audit log is **implemented in siglent-sdg-mcp 2.1.0** (see "Implementation notes"); siglent-sds-mcp follows. The OpenTelemetry export (2.2.0) is not implemented. The same document is in both repositories.
+**Status:** revision 4, after three design reviews; decisions confirmed. **Implemented in siglent-sdg-mcp 2.1.0**, both the JSONL audit log and the OpenTelemetry export (see "Implementation notes"); siglent-sds-mcp follows. The same document is in both repositories.
 
 ## Problem
 
@@ -131,18 +131,18 @@ Two tests keep the list honest. One checks that every `throw new ScpiPolicyError
 | `off` | none | — |
 
 - **The security level** covers `server.start`/`server.stop`, `audit.loss`, `guard.refused`, `instrument.connect`/`disconnect`, and requests and responses for state-changing tools. That's a few lines per configure call and none for pure reads (sds's `measure` tools count as state-changing, since they install the measurement on the display), and it's what the problem statement asks for: a refusal no longer goes unnoticed. The full trail (every `mcp.*` event and the wire-level `scpi.*` events) is 10 to 20 events per configure call, so it's opt-in.
-- **OTLP (2.2.0)** is enabled by the standard `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, and always receives the full trail. It's independent of `SIGLENT_AUDIT_LOG`: `off` plus an endpoint means OTLP only. The standard OTEL variables configure it (`OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`, ...), with no server-specific duplicates.
+- **OTLP** is enabled by the standard `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, and always receives the full trail. It's independent of `SIGLENT_AUDIT_LOG`: `off` plus an endpoint means OTLP only. The standard OTEL variables configure it (`OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`, ...), with no server-specific duplicates.
 - **Never stdout.** Stdout carries the MCP protocol. A test starts the server, makes calls that produce every event type, and checks that every line on stdout parses as JSON-RPC.
 
 ## Delivery and failure behaviour
 
 - **Non-blocking writes.** On Linux, Node writes to pipes and files synchronously. A client that pipes the server's stderr and never reads it would fill the pipe (about 64 KB) and stall the event loop, and with it every tool call; so would a file on a hung network filesystem. The audit writer therefore never writes on the event loop. Events go into a bounded in-memory queue (4096 events); one `fs.write` at a time drains it on the libuv thread pool, to fd 2 or to the file. A stuck write ties up one pool thread, never the event loop. When the queue is full, new events are dropped and counted.
-- **All stderr output goes through the same queue.** The server's human-readable lines (startup notes, auto-connect results, the sds idle-close message, the `uncaughtException`/`unhandledRejection` handlers in `src/index.ts`, and the loss warning itself) use one `log()` helper that enqueues them like audit events; `console.error` isn't used in `src/` any more, and a lint rule keeps it that way. Two writers outside `src/` are routed too: Node's process warnings (`DeprecationWarning`, `MaxListenersExceededWarning`, ...), whose default printer is replaced with a `warning` listener that calls `log()`, and, in 2.2.0, the OTEL diagnostic logger, which gets a `log()`-based logger instead of `DiagConsoleLogger`. So the writer is the only thing that writes to fd 2 after startup: nothing on the event loop can block on a full pipe, and nothing can interleave with an event. The exception is the SDK's own `console.warn` for invalid tool names, which runs only at registration, before any traffic. The loss warning is only enqueued, never written directly, so a stuck pipe produces drops, not a stall. Human-readable lines are dropped and counted like events when the queue is full; startup configuration errors, which exit before the queue exists, are the one synchronous exception.
+- **All stderr output goes through the same queue.** The server's human-readable lines (startup notes, auto-connect results, the sds idle-close message, the `uncaughtException`/`unhandledRejection` handlers in `src/index.ts`, and the loss warning itself) use one `log()` helper that enqueues them like audit events; `console.error` isn't used in `src/` any more, and a lint rule keeps it that way. Two writers outside `src/` are routed too: Node's process warnings (`DeprecationWarning`, `MaxListenersExceededWarning`, ...), whose default printer is replaced with a `warning` listener that calls `log()`, and the OTEL diagnostic logger, which gets a `log()`-based logger instead of `DiagConsoleLogger`. So the writer is the only thing that writes to fd 2 after startup: nothing on the event loop can block on a full pipe, and nothing can interleave with an event. The exception is the SDK's own `console.warn` for invalid tool names, which runs only at registration, before any traffic. The loss warning is only enqueued, never written directly, so a stuck pipe produces drops, not a stall. Human-readable lines are dropped and counted like events when the queue is full; startup configuration errors, which exit before the queue exists, are the one synchronous exception.
 - **One line per event, written whole.** Each event is serialised to a single line; over-long events are cut field by field, longest first, and marked truncated, at 16 KB. Because the writer is the only writer, a short write is simply continued from the remaining bytes; atomicity at the platform's `PIPE_BUF` (4096 bytes on Linux, 512 on macOS) isn't relied on. `EAGAIN` (if the descriptor is non-blocking) is retried with exponential backoff from 10 ms to 1 s. `EPIPE` (the reader has gone) isn't retried: the rest of the queue is counted as lost, and the sink is closed.
 - **At startup, fail closed.** If a configured file can't be opened, or the OTEL endpoint isn't a valid URL, the server exits with a configuration error. That matches the existing rule for invalid security configuration: no silent fallback.
 - **At runtime, fail open, visibly.** A failed or dropped write, or an OTLP export the collector rejects or can't receive, never blocks or fails a tool call. Each loss is counted; an `audit.loss` event reports the count once writing works again, and a warning is enqueued for stderr, rate-limited to one per minute. `audit.seq` gaps show the loss in the backend.
-- **An unreachable collector at startup** (2.2.0) is a runtime failure, so it fails open. To make sure users don't believe they have a trail when they don't, the server exports `server.start` immediately and prints a clear warning on stderr if that fails.
-- **OTEL batching** (2.2.0). The SDK's batch log record processor, with a bounded queue (2048 records) and a 1 s schedule.
+- **An unreachable collector at startup** is a runtime failure, so it fails open. To make sure users don't believe they have a trail when they don't, the server exports `server.start` immediately and prints a clear warning on stderr if that fails.
+- **OTEL batching.** The SDK's batch log record processor, with a bounded queue (2048 records) and a 1 s schedule.
 - **Shutdown.**
   - The SDK's stdio transport doesn't listen for stdin `end`, so the server adds a listener. Today, an open instrument socket keeps the process alive after stdin closes. On stdin end, the server closes the instrument connection, flushes with the same 2 s limit as below, and exits. The client has usually gone, so stderr may be closed (`EPIPE`, counted as lost) or full.
   - Clients usually stop servers with SIGTERM. A SIGTERM/SIGINT handler replaces Node's default exit, so it flushes (2 s timeout) and then calls `process.exit`.
@@ -155,11 +155,11 @@ What this design does and doesn't give:
 
 - **Against an honest server with a buggy or misbehaving model:** a complete record, with detectable losses.
 - **Against a compromised server process** (code execution inside it): nothing it produces after the compromise can be trusted. It can rewrite the local file, forge events, stop exporting, and send any command to the instrument without emitting an event, since the hooks run in the same process. It holds the export credentials (`OTEL_EXPORTER_OTLP_HEADERS` is in its environment), so it can even forge a continuous, gap-free `audit.seq` stream for the OTLP sink under the same `service.instance.id`. Records still in the batch queue (up to about 1 s) can be dropped.
-- **What the OTLP export does give (2.2.0):** events exported *before* the compromise can't be changed by the process. That holds only if the backend is append-only and the configured key can only ingest, not delete or query. The README recommends an ingest-only key.
+- **What the OTLP export does give:** events exported *before* the compromise can't be changed by the process. That holds only if the backend is append-only and the configured key can only ingest, not delete or query. The README recommends an ingest-only key.
 - **2.1.0 has no off-machine copy.** Its threat-model row must not claim integrity beyond "a record of an honest server's activity".
 - **Hash-chaining the local file** wouldn't add anything on its own: the same process could rewrite the chain from the start. Out of scope.
 
-## OpenTelemetry mapping (2.2.0)
+## OpenTelemetry mapping
 
 - **Signal and transport:** logs, via the official SDK: `@opentelemetry/api-logs`, `@opentelemetry/sdk-logs`, `@opentelemetry/exporter-logs-otlp-http`, `@opentelemetry/resources`. OTLP/HTTP.
 - **Record:** `eventName` = `siglent.audit.<event.name>`. Severity `INFO`, except `WARN` for `guard.refused`, `audit.loss` and failed results. The body is a one-line summary; every field above becomes an attribute.
@@ -209,7 +209,7 @@ What this design does and doesn't give:
   - an unwritable path makes the server exit at startup.
 - **Transport contract:** a test pins the three SDK behaviours the hooks rely on (listed under "Why the transport"), so an SDK upgrade that breaks them fails CI.
 - **Process:** stdout carries only JSON-RPC, whichever sinks are configured. Stdin end and SIGTERM both flush within 2 s and exit, with an open instrument connection too. No `console.error` remains in `src/`, and a process warning goes through `log()`.
-- **OTEL (2.2.0):** a local HTTP server stands in for the collector. It checks:
+- **OTEL:** a local HTTP server stands in for the collector. It checks:
   - the POST to `/v1/logs` and the attribute names;
   - flush on shutdown;
   - the startup warning and the loss count when the collector is down;
@@ -225,7 +225,7 @@ What this design does and doesn't give:
 1. sdg: move the host-policy check into `SiglentConnection.connect` (its own PR, no behaviour change).
 2. Both: add `rule` to `ScpiPolicyError` (no behaviour change). Make the hardware checks drain stderr.
 3. Both, **2.1.0:** the audit core, the non-blocking writer (also for the human-readable stderr lines), the stderr and file sinks, the security and full levels, the transport and connection hooks, shutdown handling, and the tests. The threat-model row changes to describe what's recorded, with the integrity limits for a local-only log. The README gets an "Audit log" section.
-4. Both, **2.2.0:** the OTLP sink, the startup export check, the README's collector example with an ingest-only key, and the threat-model update for the off-machine copy.
+4. Both, **also 2.1.0** (originally planned as 2.2.0; the maintainer chose to release both together): the OTLP sink, the startup export check, the README's collector example with an ingest-only key, and the threat-model update for the off-machine copy.
 
 ## Implementation notes (siglent-sdg-mcp 2.1.0)
 
@@ -249,6 +249,14 @@ Where the implementation makes the design concrete or departs from it:
 - **Lengths:** names and ids from the client (tool, method, request id) are bounded at 128 characters, the protocol version at 64, and human-readable stderr lines at 4096.
 - **The event schema is shared with siglent-sds-mcp,** so some values are never emitted by sdg: `opc` and `binary-query`, `out_of_step`, `idle`, `reset_after_timeout`, `reset_out_of_step`, and the causes `reconnect`, `idle-close` and `reset`.
 - **A connect still in progress at shutdown** gets no final `instrument.connect` event.
+- **OTLP export** (src/audit/otlp.ts):
+  - The SDK is loaded with a dynamic `import()` only when an endpoint is set. The exporter reads the standard `OTEL_EXPORTER_OTLP_*` variables itself; the server only validates the endpoint (an invalid URL, or a scheme other than http/https, stops it at startup) and honours `OTEL_SDK_DISABLED`.
+  - Only OTLP/HTTP with JSON payloads (`@opentelemetry/exporter-logs-otlp-http`). Another `OTEL_EXPORTER_OTLP_PROTOCOL` gets a startup note rather than being ignored silently.
+  - The sink counts its own queue: it refuses records once 2048 are waiting (the batch processor's capacity), so the processor never drops one silently. A wrapper around the exporter counts every record an export failed to deliver as lost; `takeLost()` reports them, so the `audit.seq` gaps of the `otlp` sink equal its losses.
+  - The startup check runs in the background: `server.start` is flushed right away (up to 10 s), and if no export has succeeded by then, a warning goes to stderr. The server doesn't wait for the collector to start serving.
+  - The SDK's diagnostic logger (WARN and above) goes to `audit.log()`, with URL userinfo and query strings, and every configured header value, removed.
+  - `service.name`, `service.version` and `service.instance.id` are resource attributes, not record attributes; `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` override them.
+  - An HTTP export doesn't use the thread pool, so the OTLP sink never makes shutdown kill the process.
 - **sdg has no idle close or reconnect,** so the idle-close test applies to sds only.
 
 ## Decisions
@@ -259,4 +267,4 @@ Proposed after the design reviews and confirmed by the maintainer on 15 Nov 2026
 2. **Arguments:** logged, bounded at 512 characters.
 3. **Reply text:** logged, bounded. Binary replies are size only.
 4. **Runtime failures:** fail open, with losses visible while the server runs.
-5. **OpenTelemetry:** 2.2.0. That keeps 2.1.0 free of new dependencies, gives the Development-status names time to settle, and lets the JSONL schema prove itself first.
+5. **OpenTelemetry:** originally 2.2.0, to keep 2.1.0 free of new dependencies. Since 2.1.0 hadn't been released when the export was ready, both ship together in 2.1.0 (decided 16 Nov 2026), so no version exists without the other.

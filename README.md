@@ -420,7 +420,28 @@ A refused query looks like this (shortened):
 - **Refusals have stable rule ids** (`query.not_a_query`, `wire.compound`, `schema.invalid`, `raw.disabled`, `host.not_allowed`, ...), so they can be counted and alerted on without parsing messages.
 - **Losses are visible.** Each sink numbers its records (`audit.seq`) without gaps; a missing number is a lost record, and an `audit.loss` event reports the count once the sink accepts records again. The server never waits for the log: if stderr is a pipe nobody reads, records are dropped and counted, and tool calls carry on. If a write is stuck in the kernel at shutdown (a file on a hung network filesystem), the server ends itself with SIGKILL after about 2 s rather than hanging; that shows as status 137, without a final `server.stop`.
 - **What's logged:** tool arguments and the generator's text replies, each cut at 512 characters. Tool results are summarised as types and sizes, not copied. The instrument's `*IDN?` reply includes its serial number. Nothing from the environment is logged beyond the effective configuration.
-- **What it can't do:** the log records an honest server's activity. A compromised server process could rewrite the file, forge events or send commands without logging them; the log lives on the same machine, under the same user. There's no caller identity in stdio mode: the client's name is recorded as self-reported. Shipping the log off the machine over OpenTelemetry is planned; see [docs/audit-log-design.md](docs/audit-log-design.md).
+- **What it can't do:** a local log records an honest server's activity. A compromised server process could rewrite the file, forge events or send commands without logging them; the file lives on the same machine, under the same user. Exporting to a collector (below) keeps a copy the process can't change afterwards. There's no caller identity in stdio mode: the client's name is recorded as self-reported. The design is in [docs/audit-log-design.md](docs/audit-log-design.md).
+
+### Exporting to OpenTelemetry
+
+Set the standard OpenTelemetry variables and the server also exports the full trail as OTLP log records, over HTTP with JSON payloads, to a collector or any backend that accepts OTLP:
+
+```json
+"env": {
+  "SIGLENT_SDG_IP": "192.168.1.126",
+  "OTEL_EXPORTER_OTLP_ENDPOINT": "https://otlp.example.com:4318",
+  "OTEL_EXPORTER_OTLP_HEADERS": "authorization=Bearer <ingest-only key>"
+}
+```
+
+- The export is independent of `SIGLENT_AUDIT_LOG`: with `SIGLENT_AUDIT_LOG=off` it's the only copy. `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` and `OTEL_SDK_DISABLED` work as usual. Other protocols (`grpc`, `http/protobuf`) aren't supported; the server says so at startup.
+- Each record's event name is `siglent.audit.<event>` (for example `siglent.audit.guard.refused`), refusals and failures are `WARN`, and the fields above are attributes. Attribute names follow the OpenTelemetry conventions where one exists (`gen_ai.tool.name`, `mcp.method.name`, `server.address`); the MCP conventions are still at Development status, so a name may change, and the CHANGELOG will say so.
+- **An invalid endpoint stops the server at startup.** An unreachable or failing collector doesn't: tool calls carry on, the server warns on stderr, and the records that didn't arrive are counted and reported with `audit.loss` once the export works again.
+- **What the export protects:** records exported before a compromise can't be changed by the compromised process, provided the backend is append-only and the key can only ingest, not delete or query. Use such a key. After a compromise the process holds that key, so it could stop exporting or send forged records; and records not yet exported (up to about a second's worth) can be lost.
+- The key never appears in the log: it's sent only as the configured header, the logged endpoint has no userinfo or query string, and the exporter's own diagnostic messages are redacted.
+- The exporter adds 11 packages, all from the OpenTelemetry project. They're loaded only when an endpoint is set.
+
+In Docker, pass the key by name, so its value comes from the client's environment and isn't written into the MCP config, where `docker inspect` and `ps` would show it: `"-e", "OTEL_EXPORTER_OTLP_HEADERS"` (or use `--env-file`).
 
 **Docker:** stderr works unchanged with `--read-only`. A file needs a mounted directory that UID 1000 can write: add `"-v", "/host/audit:/audit", "-e", "SIGLENT_AUDIT_LOG=/audit/sdg.jsonl"` to the `docker run` arguments. On Linux the file then belongs to UID 1000 with mode `0600`, so only that user (or root) can read it on the host; add `"--user", "<your uid>:<your gid>"` to run the server as your own user instead (still not root). Docker Desktop on macOS and Windows maps ownership to your user.
 

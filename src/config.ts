@@ -17,6 +17,47 @@ export interface ServerConfig {
   /** Human-readable notes about the effective configuration, logged at startup. */
   notes: string[];
   audit: AuditConfig;
+  /** OTLP export of the full audit trail, when an endpoint is configured. */
+  otlp?: OtlpConfig;
+}
+
+export interface OtlpConfig {
+  /** The endpoint as it may be logged: no userinfo, query string or fragment. */
+  endpoint: string;
+}
+
+/**
+ * The OTLP export is enabled by the standard variables, which the exporter
+ * itself reads (endpoint, headers, timeout). Here only the endpoint is checked
+ * (an invalid URL is a configuration error) and the protocol: this server
+ * sends OTLP/HTTP with JSON payloads.
+ */
+function parseOtlp(env: NodeJS.ProcessEnv, notes: string[]): OtlpConfig | undefined {
+  if ((env.OTEL_SDK_DISABLED ?? "").trim().toLowerCase() === "true") return undefined;
+  const name = (env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT ?? "").trim()
+    ? "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"
+    : (env.OTEL_EXPORTER_OTLP_ENDPOINT ?? "").trim()
+      ? "OTEL_EXPORTER_OTLP_ENDPOINT"
+      : undefined;
+  if (!name) return undefined;
+  let url: URL;
+  try {
+    url = new URL(env[name]!.trim());
+  } catch {
+    throw new Error(`${name} is not a valid URL.`);
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error(`${name} must be an http:// or https:// URL.`);
+  }
+  const protocol = (env.OTEL_EXPORTER_OTLP_LOGS_PROTOCOL ?? env.OTEL_EXPORTER_OTLP_PROTOCOL ?? "").trim();
+  if (protocol && protocol !== "http/json") {
+    notes.push(`OTEL_EXPORTER_OTLP_PROTOCOL=${protocol} is not supported; audit events are exported as OTLP/HTTP with JSON.`);
+  }
+  url.username = "";
+  url.password = "";
+  url.search = "";
+  url.hash = "";
+  return { endpoint: url.toString() };
 }
 
 /**
@@ -98,5 +139,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     rawScpiEnabled,
     notes,
     audit: parseAudit(env.SIGLENT_AUDIT_LOG),
+    otlp: parseOtlp(env, notes),
   };
 }

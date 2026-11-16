@@ -3,6 +3,7 @@
 import * as fs from "node:fs";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { audit, JsonlSink, logSync, withAuditContext, type AuditSink } from "./audit/audit.js";
+import { startOtlpSink, type OtlpSink } from "./audit/otlp.js";
 import { FdWriter } from "./audit/writer.js";
 import { loadConfig, type AuditConfig, type ServerConfig } from "./config.js";
 import { connection } from "./connection.js";
@@ -40,6 +41,21 @@ if (config.audit.sink === "stderr") {
 }
 audit.configure({ service: { name: "siglent-sdg-mcp", version: SERVER_VERSION }, sinks, stderr });
 
+// The OTLP export, loaded only when an endpoint is configured.
+let otlp: OtlpSink | undefined;
+if (config.otlp) {
+  try {
+    otlp = await startOtlpSink({
+      service: { name: "siglent-sdg-mcp", version: SERVER_VERSION, instanceId: audit.instanceId },
+      log: (message) => audit.log(message),
+    });
+    audit.configure({ sinks: [...sinks, otlp] });
+  } catch (err) {
+    logSync(`Configuration error: can't start the OTLP export: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+}
+
 // Prevent uncaught errors from killing the MCP server process
 process.on("uncaughtException", (err) => {
   audit.log(`Uncaught exception: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
@@ -60,9 +76,26 @@ audit.serverStart({
   rawScpiEnabled: config.rawScpiEnabled,
   allowedHosts: config.hostPolicy.allowedHosts,
   allowedPorts: config.hostPolicy.allowedPorts,
-  audit: describeAudit(config.audit),
+  audit: describeAudit(config.audit) + (config.otlp ? ` otlp:${config.otlp.endpoint}` : ""),
 });
 const server = createServer(config);
+
+// An unreachable collector is a runtime failure, so it doesn't stop the
+// server, but nobody should believe they have an off-machine trail when they
+// don't: server.start is exported right away, and a failure is reported.
+if (otlp && config.otlp) {
+  const sink = otlp;
+  const endpoint = config.otlp.endpoint;
+  void sink.flush(10_000).then(() => {
+    if (sink.status.exportsOk === 0) {
+      audit.log(
+        `audit: the OTLP export to ${endpoint} isn't working` +
+          (sink.status.lastError ? ` (${sink.status.lastError})` : " (no answer yet)") +
+          "; events are counted as lost until it does."
+      );
+    }
+  });
+}
 
 function describeAudit(a: AuditConfig): string {
   if (a.sink === "off") return "off";
